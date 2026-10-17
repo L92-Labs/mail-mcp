@@ -1,0 +1,26 @@
+{
+  "name": "mail-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SMTP/IMAP MCP — Docker or Cloudflare Workers, pull or pull+push",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.18.0",
+  "scripts": {
+    "build": "pnpm --filter @mail-mcp/core build && pnpm --filter @mail-mcp/node build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "dev:node": "pnpm --filter @mail-mcp/node dev",
+    "start:node": "pnpm --filter @mail-mcp/node start",
+    "dev:worker": "pnpm --filter @mail-mcp/worker dev",
+    "deploy:worker": "pnpm --filter @mail-mcp/worker deploy"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

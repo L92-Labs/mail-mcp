@@ -1,0 +1,18 @@
+MCP_BEARER_TOKEN=dev-token-change-me
+MAIL_MODE=pull_push
+CACHE_TTL_SECONDS=0
+EVENTS_POLL_SECONDS=300
+DEFAULT_EMAIL_ACCOUNT=default
+
+# Either EMAIL_ACCOUNTS_JSON=... or IMAP_*/SMTP_* below
+IMAP_HOST=imap.example.com
+IMAP_PORT=993
+IMAP_SECURE=true
+IMAP_USER=you@example.com
+IMAP_PASS=app-password
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=you@example.com
+SMTP_PASS=app-password
+DEFAULT_FROM_NAME=You

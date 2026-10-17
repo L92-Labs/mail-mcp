@@ -1,0 +1,26 @@
+{
+  "name": "@mail-mcp/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@mail-mcp/core": "workspace:*",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "agents": "^0.20.1",
+    "cf-imap": "^1.0.0",
+    "hono": "^4.7.0",
+    "worker-mailer": "^1.3.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "typescript": "^5.8.0",
+    "wrangler": "^4.42.0"
+  }
+}

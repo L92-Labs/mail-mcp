@@ -1,0 +1,23 @@
+name = "mail-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-10-17"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "MAIL_KV"
+id = "00000000000000000000000000000000"
+preview_id = "00000000000000000000000000000000"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+MAIL_MODE = "pull_push"
+CACHE_TTL_SECONDS = "0"
+EVENTS_POLL_SECONDS = "300"
+DEFAULT_EMAIL_ACCOUNT = "default"
+
+# Secrets (wrangler secret put …):
+#   MCP_BEARER_TOKEN
+#   EMAIL_ACCOUNTS_JSON
+# or IMAP_*/SMTP_* singles
