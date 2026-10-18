@@ -218,6 +218,16 @@ describe("email_respond", () => {
     await dispatchTool("email_respond", { email_id: "Sent:3", body: "ping" }, makeCtx(b));
     expect(sentMsg(b).to).toEqual(["zoe@x.com"]);
   });
+
+  it("note-to-self threads reply to me; explicit to[] may include me", async () => {
+    const b = fakeBackend({
+      getEmail: vi.fn(async () => ({ ...original, from: "me@example.com", to: ["Me <me@example.com>"], cc: [] })),
+    });
+    await dispatchTool("email_respond", { email_id: "INBOX:3", body: "ping" }, makeCtx(b));
+    expect(sentMsg(b).to).toEqual(["Me <me@example.com>"]);
+    await dispatchTool("email_respond", { email_id: "INBOX:7", body: "ping", to: ["me@example.com"] }, makeCtx(b));
+    expect((b.sendMessage.mock.calls[1]![1] as OutgoingMessage).to).toEqual(["me@example.com"]);
+  });
 });
 
 describe("email_draft", () => {
