@@ -330,7 +330,10 @@ export function composeReply(
     }
   }
 
-  const toList = dedupeAddresses(to, isForward ? new Set() : self);
+  const explicitTo = isForward || Boolean(input.to?.length);
+  let toList = dedupeAddresses(to, explicitTo ? new Set() : self);
+  // A note-to-self thread (from me, to me) keeps replying to me.
+  if (toList.length === 0 && !explicitTo) toList = dedupeAddresses(to, new Set());
   const toSet = new Set(toList.map(extractAddress));
   const ccList = dedupeAddresses(cc, new Set([...self, ...toSet]));
   if (toList.length === 0) {
