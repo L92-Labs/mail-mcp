@@ -11,30 +11,30 @@ export async function pollNewMessages(opts: {
   cursors: CursorStore;
   limit: number;
   advance: boolean;
-}): Promise<{ messages: EmailMessage[]; cursor: number; advanced: boolean }> {
+}): Promise<{
+  messages: EmailMessage[];
+  cursor: number;
+  advanced: boolean;
+  seeded: boolean;
+  hasMore: boolean;
+}> {
   const { backend, account, folder, cursors, limit, advance } = opts;
   const key = eventCursorKey(account.name, folder);
   const raw = await cursors.get(key);
-  let afterUid = raw ? Number(raw) : 0;
-  if (!Number.isFinite(afterUid) || afterUid < 0) afterUid = 0;
+  const stored = raw === null ? NaN : Number(raw);
 
-  if (afterUid === 0) {
-    // First run: seed cursor at current high-water mark so we don't dump the inbox.
+  if (!Number.isFinite(stored) || stored < 0) {
+    // First run: seed at the current high-water mark so we don't dump the inbox.
     const high = await backend.getHighestUid(account, folder);
     if (advance) await cursors.set(key, String(high));
-    return { messages: [], cursor: high, advanced: advance };
+    return { messages: [], cursor: high, advanced: advance, seeded: true, hasMore: false };
   }
 
-  const messages = await backend.listNewSince(account, folder, afterUid, limit);
-  let cursor = afterUid;
-  if (messages.length > 0) {
-    cursor = Math.max(...messages.map((m) => m.uid));
-  }
-  if (advance && cursor > afterUid) {
-    await cursors.set(key, String(cursor));
-  }
-
-  return { messages, cursor: advance ? cursor : afterUid, advanced: advance && cursor > afterUid };
+  const { messages, hasMore } = await backend.listNewSince(account, folder, stored, limit);
+  const cursor = messages.reduce((m, e) => Math.max(m, e.uid), stored);
+  const advanced = advance && cursor > stored;
+  if (advanced) await cursors.set(key, String(cursor));
+  return { messages, cursor: advance ? cursor : stored, advanced, seeded: false, hasMore };
 }
 
 export async function warmEventCursors(opts: {

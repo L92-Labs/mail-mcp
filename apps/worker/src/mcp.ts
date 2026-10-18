@@ -1,6 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
-import { z } from "zod";
 import {
   authorizeBearer,
   dispatchTool,
@@ -26,20 +25,20 @@ function createContext(env: WorkerEnv): DispatchContext {
 
 export function buildMcpServer(env: WorkerEnv, request: Request): McpServer {
   const ctx = createContext(env);
-  const server = new McpServer({ name: "mail-mcp", version: "0.1.0" });
+  const server = new McpServer({ name: "mail-mcp", version: "0.2.0" });
 
   for (const tool of enabledToolMeta(ctx.config)) {
-    const props = (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
-    const shape: Record<string, z.ZodTypeAny> = {};
-    for (const key of Object.keys(props)) {
-      shape[key] = z.any().optional();
-    }
-
     server.registerTool(
       tool.name,
       {
+        title: tool.title,
         description: tool.description,
-        inputSchema: shape,
+        inputSchema: tool.inputSchema,
+        annotations: {
+          readOnlyHint: tool.readOnly,
+          destructiveHint: false,
+          openWorldHint: tool.name === "email_send" || tool.name === "email_respond",
+        },
       },
       async (args) => {
         if (!authorizeBearer(ctx.config.mcpBearerToken, request.headers.get("authorization"))) {

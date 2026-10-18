@@ -24,31 +24,18 @@ export type WorkerEnv = {
   SMTP_PASSWORD?: string;
   DEFAULT_FROM_NAME?: string;
   SENDER_EMAILS?: string;
+  SENT_FOLDER?: string;
+  DRAFTS_FOLDER?: string;
+  SAVE_SENT?: string;
+  SEND_ALLOWLIST?: string;
+  MAX_BODY_CHARS?: string;
+  ATTACHMENT_MAX_BYTES?: string;
 };
 
 export function envToMap(env: WorkerEnv): EnvMap {
-  return {
-    MCP_BEARER_TOKEN: env.MCP_BEARER_TOKEN,
-    EMAIL_ACCOUNTS_JSON: env.EMAIL_ACCOUNTS_JSON,
-    DEFAULT_EMAIL_ACCOUNT: env.DEFAULT_EMAIL_ACCOUNT,
-    MAIL_MODE: env.MAIL_MODE,
-    CACHE_TTL_SECONDS: env.CACHE_TTL_SECONDS,
-    EVENTS_POLL_SECONDS: env.EVENTS_POLL_SECONDS,
-    IMAP_HOST: env.IMAP_HOST,
-    IMAP_PORT: env.IMAP_PORT,
-    IMAP_SECURE: env.IMAP_SECURE,
-    IMAP_USER: env.IMAP_USER,
-    IMAP_PASS: env.IMAP_PASS,
-    IMAP_USERNAME: env.IMAP_USERNAME,
-    IMAP_PASSWORD: env.IMAP_PASSWORD,
-    SMTP_HOST: env.SMTP_HOST,
-    SMTP_PORT: env.SMTP_PORT,
-    SMTP_SECURE: env.SMTP_SECURE,
-    SMTP_USER: env.SMTP_USER,
-    SMTP_PASS: env.SMTP_PASS,
-    SMTP_USERNAME: env.SMTP_USERNAME,
-    SMTP_PASSWORD: env.SMTP_PASSWORD,
-    DEFAULT_FROM_NAME: env.DEFAULT_FROM_NAME,
-    SENDER_EMAILS: env.SENDER_EMAILS,
-  };
+  const map: EnvMap = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value === "string") map[key] = value;
+  }
+  return map;
 }

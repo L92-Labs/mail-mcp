@@ -1,11 +1,33 @@
+# Stateless: all config via .env, no volumes.
+#   docker compose up -d --build                    # MCP on 127.0.0.1:8787 only
+#   docker compose --profile tunnel up -d --build   # + Cloudflare Tunnel (TUNNEL_TOKEN in .env)
 services:
   mail-mcp:
     build: .
-    ports:
-      - "8787:8787"
     env_file:
       - .env
     environment:
       MCP_TRANSPORT: http
       PORT: "8787"
+    # Loopback only: the tunnel reaches the container over the compose network.
+    ports:
+      - "127.0.0.1:8787:8787"
+    read_only: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      mail-mcp:
+        condition: service_healthy
     restart: unless-stopped

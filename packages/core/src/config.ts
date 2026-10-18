@@ -3,6 +3,7 @@ import type {
   ImapConfig,
   MailMode,
   RuntimeConfig,
+  SaveSentPolicy,
   SmtpConfig,
 } from "./types.js";
 
@@ -25,8 +26,31 @@ function parsePort(value: string | undefined, fallback: number): number {
 
 function parseMode(value: string | undefined): MailMode {
   const mode = (value ?? "pull_push").trim().toLowerCase();
-  if (mode === "pull" || mode === "pull_push") return mode;
-  throw new Error(`MAIL_MODE must be "pull" or "pull_push", got: ${value}`);
+  if (mode === "pull" || mode === "draft" || mode === "pull_push") return mode;
+  throw new Error(`MAIL_MODE must be "pull", "draft" or "pull_push", got: ${value}`);
+}
+
+function parseSaveSent(value: unknown, name: string): SaveSentPolicy | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const v = String(value).trim().toLowerCase();
+  if (v === "auto") return "auto";
+  if (["1", "true", "yes", "on", "always"].includes(v)) return "always";
+  if (["0", "false", "no", "off", "never"].includes(v)) return "never";
+  throw new Error(`${name} must be auto, true or false, got: ${String(value)}`);
+}
+
+function parseNonNegative(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+export function parseAllowlist(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(/[,\s]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function requireNonEmpty(value: string | undefined, name: string): string {
@@ -61,6 +85,12 @@ type RawAccount = {
   defaultFromName?: string;
   sender_emails?: string[];
   senderEmails?: string[];
+  save_sent?: string | boolean;
+  saveSent?: string | boolean;
+  sent_folder?: string;
+  sentFolder?: string;
+  drafts_folder?: string;
+  draftsFolder?: string;
 };
 
 function normalizeAccount(name: string, raw: RawAccount): EmailAccount {
@@ -80,6 +110,9 @@ function normalizeAccount(name: string, raw: RawAccount): EmailAccount {
     ),
     defaultFromName: raw.defaultFromName ?? raw.default_from_name,
     senderEmails: raw.senderEmails ?? raw.sender_emails,
+    saveSent: parseSaveSent(raw.saveSent ?? raw.save_sent, `account "${name}" save_sent`),
+    sentFolder: raw.sentFolder ?? raw.sent_folder,
+    draftsFolder: raw.draftsFolder ?? raw.drafts_folder,
   };
 
   if (raw.smtp?.host && raw.smtp.user && raw.smtp.password) {
@@ -135,6 +168,8 @@ function loadSingleAccount(env: EnvMap): Record<string, EmailAccount> | null {
     senderEmails: env.SENDER_EMAILS
       ? env.SENDER_EMAILS.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined,
+    sentFolder: env.SENT_FOLDER?.trim() || undefined,
+    draftsFolder: env.DRAFTS_FOLDER?.trim() || undefined,
   };
 
   const smtpHost = env.SMTP_HOST;
@@ -182,16 +217,17 @@ export function loadRuntimeConfig(
     }
   }
 
-  const cacheTtlSeconds = Math.max(0, Number(env.CACHE_TTL_SECONDS ?? "0") || 0);
-  const eventsPollSeconds = Math.max(0, Number(env.EVENTS_POLL_SECONDS ?? "0") || 0);
-
   return {
     accounts,
     defaultAccount,
     mode,
-    cacheTtlSeconds,
-    eventsPollSeconds,
+    cacheTtlSeconds: parseNonNegative(env.CACHE_TTL_SECONDS, 0),
+    eventsPollSeconds: parseNonNegative(env.EVENTS_POLL_SECONDS, 0),
     mcpBearerToken: env.MCP_BEARER_TOKEN?.trim() || undefined,
+    saveSent: parseSaveSent(env.SAVE_SENT, "SAVE_SENT") ?? "auto",
+    sendAllowlist: parseAllowlist(env.SEND_ALLOWLIST),
+    maxBodyChars: parseNonNegative(env.MAX_BODY_CHARS, 20_000) || 20_000,
+    attachmentMaxBytes: parseNonNegative(env.ATTACHMENT_MAX_BYTES, 2_000_000),
   };
 }
 
@@ -217,20 +253,16 @@ export function assertPushAllowed(config: RuntimeConfig, tool: string): void {
   }
 }
 
+export function assertDraftAllowed(config: RuntimeConfig, tool: string): void {
+  if (config.mode === "pull") {
+    throw new Error(
+      `tool "${tool}" requires MAIL_MODE=draft or pull_push (current: ${config.mode})`,
+    );
+  }
+}
+
 export function assertCanSend(account: EmailAccount): void {
   if (!account.smtp) {
     throw new Error(`account "${account.name}" has no SMTP config`);
   }
-}
-
-export function pickFromAddress(account: EmailAccount, fromEmail?: string): string {
-  const smtpUser = account.smtp?.user ?? account.imap.user;
-  if (!fromEmail) return smtpUser;
-  const allow = account.senderEmails;
-  if (allow && allow.length > 0 && !allow.includes(fromEmail)) {
-    throw new Error(
-      `from_email "${fromEmail}" not in sender_emails for account "${account.name}"`,
-    );
-  }
-  return fromEmail;
 }

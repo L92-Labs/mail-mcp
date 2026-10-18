@@ -4,3 +4,4 @@ export * from "./cache.js";
 export * from "./events.js";
 export * from "./schemas.js";
 export * from "./dispatch.js";
+export * from "./compose.js";
