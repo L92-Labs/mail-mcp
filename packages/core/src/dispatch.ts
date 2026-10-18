@@ -1,11 +1,32 @@
-import { assertCanSend, assertPushAllowed, resolveAccount } from "./config.js";
+import type { z } from "zod";
+import {
+  assertCanSend,
+  assertDraftAllowed,
+  assertPushAllowed,
+  resolveAccount,
+} from "./config.js";
 import { cacheKey, cachedJson } from "./cache.js";
+import {
+  allRecipients,
+  assertRecipientsAllowed,
+  composeNew,
+  composeReply,
+  parseEmailId,
+  parseFolderAlias,
+  resolveSpecialFolder,
+  shouldSaveSent,
+  truncate,
+  type ReplyInput,
+  type SpecialFolder,
+} from "./compose.js";
 import { pollNewMessages } from "./events.js";
 import {
   accountsListSchema,
+  draftEmailSchema,
   eventsSchema,
   findEmailsSchema,
   foldersListSchema,
+  getEmailSchema,
   modifyEmailsSchema,
   respondEmailSchema,
   sendEmailSchema,
@@ -15,7 +36,11 @@ import {
 import type {
   CacheStore,
   CursorStore,
+  EmailAccount,
+  EmailDetail,
+  FolderInfo,
   MailBackend,
+  OutgoingMessage,
   RuntimeConfig,
 } from "./types.js";
 
@@ -28,114 +53,84 @@ export type DispatchContext = {
 
 export type ToolMeta = {
   name: ToolName;
+  title: string;
   description: string;
-  /** JSON Schema-ish object for docs / MCP registration helpers */
-  inputSchema: Record<string, unknown>;
+  inputSchema: z.ZodObject;
+  readOnly: boolean;
 };
 
 export const TOOL_META: ToolMeta[] = [
   {
     name: "accounts_list",
+    title: "List accounts",
     description:
-      "List configured email accounts, default account, and MAIL_MODE (pull vs pull_push).",
-    inputSchema: { type: "object", properties: {} },
+      "List configured mailboxes, the default account, MAIL_MODE and what each account can do (draft/send). Call first when unsure which account_name to use.",
+    inputSchema: accountsListSchema,
+    readOnly: true,
   },
   {
     name: "folders_list",
-    description: "List IMAP folders for an account.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        account_name: { type: "string" },
-      },
-    },
+    title: "List folders",
+    description:
+      "List IMAP folders with their special use (\\Sent, \\Drafts, \\Trash, \\Archive, \\Junk).",
+    inputSchema: foldersListSchema,
+    readOnly: true,
   },
   {
     name: "emails_find",
+    title: "Find emails",
     description:
-      "Search/list emails with optional filters. Set include_content to fetch bodies.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        account_name: { type: "string" },
-        folder: { type: "string" },
-        query: { type: "string" },
-        filters: { type: "object" },
-        limit: { type: "number" },
-        include_content: { type: "boolean" },
-        include_attachments: { type: "boolean" },
-      },
-    },
+      "Search or list emails in a folder, newest first, paginated. Returns light summaries (id, from, subject, date, snippet, flags) plus total and next_cursor. Pass next_cursor back as cursor for the next page. Use email_get to read one message in full.",
+    inputSchema: findEmailsSchema,
+    readOnly: true,
+  },
+  {
+    name: "email_get",
+    title: "Read email",
+    description:
+      "Read one email in full: headers, body text (HTML converted to text), attachment list, threading ids. Does not mark it read unless mark_read=true.",
+    inputSchema: getEmailSchema,
+    readOnly: true,
   },
   {
     name: "emails_modify",
-    description: "Mark read/unread, flag/unflag, or move emails between folders.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        account_name: { type: "string" },
-        folder: { type: "string" },
-        email_ids: { type: "array", items: { type: "string" } },
-        mark_read: { type: "boolean" },
-        mark_unread: { type: "boolean" },
-        flag: { type: "boolean" },
-        unflag: { type: "boolean" },
-        move_to_folder: { type: "string" },
-      },
-      required: ["email_ids"],
-    },
+    title: "Organize emails",
+    description:
+      "Mark read/unread, flag/unflag, or move emails (archive, trash, junk, or any folder). Accepts several ids at once.",
+    inputSchema: modifyEmailsSchema,
+    readOnly: false,
   },
   {
     name: "emails_events",
+    title: "New mail since",
     description:
-      "Poll for new messages since the per-account watermark (MCP inbox events). First call seeds the cursor.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        account_name: { type: "string" },
-        folder: { type: "string" },
-        limit: { type: "number" },
-        advance: { type: "boolean", description: "Advance cursor after read (default true)" },
-      },
-    },
+      "Get messages that arrived after a UID watermark, oldest first. Stateless: pass after_uid = next_after_uid from the previous call. Without after_uid a server-side cursor is used (first call only seeds it).",
+    inputSchema: eventsSchema,
+    readOnly: true,
+  },
+  {
+    name: "email_draft",
+    title: "Save draft",
+    description:
+      "Save a draft to the account's Drafts folder without sending: a new message, or a threaded reply/forward when email_id is set. The human reviews and sends it from their mail client.",
+    inputSchema: draftEmailSchema,
+    readOnly: false,
   },
   {
     name: "email_send",
-    description: "Send a new email via SMTP. Requires MAIL_MODE=pull_push.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        account_name: { type: "string" },
-        to: { type: "array", items: { type: "string" } },
-        subject: { type: "string" },
-        body: { type: "string" },
-        body_type: { type: "string", enum: ["plain", "html"] },
-        from_email: { type: "string" },
-        cc: { type: "array", items: { type: "string" } },
-        bcc: { type: "array", items: { type: "string" } },
-        attachments: { type: "array" },
-      },
-      required: ["to", "subject", "body"],
-    },
+    title: "Send email",
+    description:
+      "Send a new email over SMTP (to/cc/bcc, plain or HTML, attachments). Copies it to Sent when the provider does not. Recipients are checked against SEND_ALLOWLIST.",
+    inputSchema: sendEmailSchema,
+    readOnly: false,
   },
   {
     name: "email_respond",
-    description: "Reply or forward an existing email. Requires MAIL_MODE=pull_push.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        account_name: { type: "string" },
-        email_id: { type: "string" },
-        folder: { type: "string" },
-        body: { type: "string" },
-        body_type: { type: "string", enum: ["plain", "html"] },
-        reply_all: { type: "boolean" },
-        forward: { type: "boolean" },
-        to: { type: "array", items: { type: "string" } },
-        subject: { type: "string" },
-      },
-      required: ["email_id", "body"],
-    },
+    title: "Reply / forward",
+    description:
+      "Reply, reply-all or forward an existing email with proper threading (In-Reply-To/References) and the original quoted. Your own addresses are removed from reply-all; forwards carry the original attachments. Marks the original as answered.",
+    inputSchema: respondEmailSchema,
+    readOnly: false,
   },
 ];
 
@@ -144,6 +139,128 @@ export function enabledToolMeta(config: RuntimeConfig): ToolMeta[] {
   return TOOL_META.filter((t) => allowed.has(t.name));
 }
 
+// ---------- helpers ----------
+
+async function cacheGeneration(ctx: DispatchContext, account: EmailAccount): Promise<string> {
+  if (!ctx.cache || ctx.config.cacheTtlSeconds <= 0) return "0";
+  return (await ctx.cache.get(`gen|${account.name}`)) ?? "0";
+}
+
+/** Invalidate cached listings for an account after a mutation. */
+async function bumpCache(ctx: DispatchContext, account: EmailAccount): Promise<void> {
+  if (!ctx.cache || ctx.config.cacheTtlSeconds <= 0) return;
+  await ctx.cache.set(`gen|${account.name}`, String(Date.now()), 86_400);
+}
+
+async function listFolders(ctx: DispatchContext, account: EmailAccount): Promise<FolderInfo[]> {
+  return cachedJson(
+    ctx.cache,
+    ctx.config.cacheTtlSeconds,
+    cacheKey(["folders", account.name]),
+    () => ctx.backend.listFolders(account),
+  );
+}
+
+async function specialFolder(
+  ctx: DispatchContext,
+  account: EmailAccount,
+  kind: SpecialFolder,
+): Promise<string | null> {
+  if (kind === "sent" && account.sentFolder) return account.sentFolder;
+  if (kind === "drafts" && account.draftsFolder) return account.draftsFolder;
+  return resolveSpecialFolder(await listFolders(ctx, account), kind);
+}
+
+async function resolveMoveTarget(
+  ctx: DispatchContext,
+  account: EmailAccount,
+  value: string,
+): Promise<string> {
+  if (value.trim().toLowerCase() === "inbox") return "INBOX";
+  const alias = parseFolderAlias(value);
+  if (!alias) return value;
+  const folders = await listFolders(ctx, account);
+  // A literal folder with this exact path wins over the alias.
+  if (folders.some((f) => f.path === value)) return value;
+  const path = resolveSpecialFolder(folders, alias);
+  if (!path) {
+    throw new Error(
+      `no "${alias}" folder found for account "${account.name}"; pass an exact path from folders_list`,
+    );
+  }
+  return path;
+}
+
+async function loadOriginal(
+  ctx: DispatchContext,
+  account: EmailAccount,
+  emailId: string,
+  withAttachments: boolean,
+): Promise<EmailDetail> {
+  parseEmailId(emailId);
+  return ctx.backend.getEmail(account, {
+    emailId,
+    includeAttachmentContent: withAttachments,
+    attachmentMaxBytes: ctx.config.attachmentMaxBytes,
+  });
+}
+
+type DeliveryResult = {
+  message_id: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  saved_to_sent: string | null;
+  warnings: string[];
+};
+
+async function deliver(
+  ctx: DispatchContext,
+  account: EmailAccount,
+  msg: OutgoingMessage,
+): Promise<DeliveryResult> {
+  if (allRecipients(msg).length === 0) throw new Error("no recipients");
+  assertRecipientsAllowed(ctx.config.sendAllowlist, allRecipients(msg));
+  await ctx.backend.sendMessage(account, msg);
+
+  const warnings: string[] = [];
+  let savedTo: string | null = null;
+  if (shouldSaveSent(ctx.config, account)) {
+    try {
+      const sent = await specialFolder(ctx, account, "sent");
+      if (sent) {
+        await ctx.backend.appendMessage(account, sent, msg, ["\\Seen"]);
+        savedTo = sent;
+      } else {
+        warnings.push("sent, but no Sent folder found to store a copy (set sent_folder)");
+      }
+    } catch (error) {
+      warnings.push(`sent, but saving a copy to Sent failed: ${errMessage(error)}`);
+    }
+  }
+  await bumpCache(ctx, account);
+  return {
+    message_id: msg.messageId,
+    to: msg.to,
+    cc: msg.cc,
+    bcc: msg.bcc,
+    subject: msg.subject,
+    saved_to_sent: savedTo,
+    warnings,
+  };
+}
+
+function errMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function attachmentsArg(list?: Array<{ filename: string; content: string; content_type?: string }>) {
+  return list?.map((a) => ({ filename: a.filename, content: a.content, contentType: a.content_type }));
+}
+
+// ---------- dispatch ----------
+
 export async function dispatchTool(
   name: string,
   args: unknown,
@@ -151,152 +268,292 @@ export async function dispatchTool(
 ): Promise<unknown> {
   const allowed = toolsForMode(ctx.config.mode);
   if (!allowed.includes(name as ToolName)) {
-    throw new Error(`unknown or disabled tool: ${name}`);
+    throw new Error(`unknown or disabled tool: ${name} (MAIL_MODE=${ctx.config.mode})`);
   }
 
   switch (name as ToolName) {
     case "accounts_list": {
       accountsListSchema.parse(args ?? {});
+      const mode = ctx.config.mode;
       return {
         default_account: ctx.config.defaultAccount,
-        mode: ctx.config.mode,
-        cache_ttl_seconds: ctx.config.cacheTtlSeconds,
-        events_poll_seconds: ctx.config.eventsPollSeconds,
+        mode,
+        send_allowlist: ctx.config.sendAllowlist.length ? ctx.config.sendAllowlist : null,
         accounts: Object.values(ctx.config.accounts).map((a) => ({
           name: a.name,
-          imap_host: a.imap.host,
-          smtp_host: a.smtp?.host ?? null,
-          can_send: Boolean(a.smtp) && ctx.config.mode === "pull_push",
+          address: a.smtp?.user ?? a.imap.user,
+          sender_emails: a.senderEmails ?? [],
+          can_draft: mode !== "pull",
+          can_send: Boolean(a.smtp) && mode === "pull_push",
+          saves_sent_copy: Boolean(a.smtp) && shouldSaveSent(ctx.config, a),
         })),
       };
     }
+
     case "folders_list": {
       const parsed = foldersListSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
-      return cachedJson(
-        ctx.cache,
-        ctx.config.cacheTtlSeconds,
-        cacheKey(["folders", account.name]),
-        () => ctx.backend.listFolders(account),
-      );
+      return { folders: await listFolders(ctx, account) };
     }
+
     case "emails_find": {
       const parsed = findEmailsSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
+      const folder = parsed.folder?.trim() || "INBOX";
+      const f = parsed.filters;
       const input = {
-        accountName: parsed.account_name,
-        folder: parsed.folder,
+        folder,
         query: parsed.query,
-        filters: parsed.filters
+        filters: f
           ? {
-              from: parsed.filters.from,
-              to: parsed.filters.to,
-              subject: parsed.filters.subject,
-              hasAttachments: parsed.filters.has_attachments,
-              isUnread: parsed.filters.is_unread,
-              isFlagged: parsed.filters.is_flagged,
-              afterDate: parsed.filters.after_date,
-              beforeDate: parsed.filters.before_date,
+              from: f.from,
+              to: f.to,
+              subject: f.subject,
+              hasAttachments: f.has_attachments,
+              isUnread: f.is_unread,
+              isFlagged: f.is_flagged,
+              afterDate: f.after_date,
+              beforeDate: f.before_date,
             }
           : undefined,
-        limit: parsed.limit,
+        limit: parsed.limit ?? 20,
+        cursor: parsed.cursor,
         includeContent: parsed.include_content,
-        includeAttachments: parsed.include_attachments,
       };
-      const useCache =
-        !parsed.include_content &&
-        !parsed.include_attachments &&
-        ctx.config.cacheTtlSeconds > 0;
-      if (!useCache) {
-        return { emails: await ctx.backend.findEmails(account, input) };
-      }
-      const emails = await cachedJson(
-        ctx.cache,
-        ctx.config.cacheTtlSeconds,
-        cacheKey([
-          "find",
-          account.name,
-          parsed.folder,
-          parsed.query,
-          JSON.stringify(parsed.filters ?? {}),
-          parsed.limit ?? 20,
-        ]),
-        () => ctx.backend.findEmails(account, input),
-      );
-      return { emails };
+      const load = () => ctx.backend.findEmails(account, input);
+      const result =
+        parsed.include_content || ctx.config.cacheTtlSeconds <= 0
+          ? await load()
+          : await cachedJson(
+              ctx.cache,
+              ctx.config.cacheTtlSeconds,
+              cacheKey([
+                "find",
+                account.name,
+                await cacheGeneration(ctx, account),
+                folder,
+                parsed.query,
+                JSON.stringify(f ?? {}),
+                input.limit,
+                parsed.cursor,
+              ]),
+              load,
+            );
+      // Server-side attachment search is a header heuristic; drop false positives exactly.
+      const emails =
+        f?.has_attachments === undefined
+          ? result.emails
+          : result.emails.filter((e) => e.hasAttachments === f.has_attachments);
+      return {
+        account: account.name,
+        folder,
+        total: result.total,
+        count: emails.length,
+        next_cursor: result.nextCursor,
+        emails,
+      };
     }
+
+    case "email_get": {
+      const parsed = getEmailSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      parseEmailId(parsed.email_id);
+      const detail = await ctx.backend.getEmail(account, {
+        emailId: parsed.email_id,
+        includeAttachmentContent: parsed.include_attachment_content,
+        attachmentMaxBytes: ctx.config.attachmentMaxBytes,
+        markRead: parsed.mark_read,
+      });
+      if (parsed.mark_read) await bumpCache(ctx, account);
+      const { text, truncated } = truncate(
+        detail.bodyText,
+        parsed.max_chars ?? ctx.config.maxBodyChars,
+      );
+      const { bodyHtml, ...rest } = detail;
+      return {
+        ...rest,
+        bodyText: text,
+        truncated,
+        ...(parsed.include_html && bodyHtml ? { bodyHtml } : {}),
+      };
+    }
+
     case "emails_modify": {
       const parsed = modifyEmailsSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
-      return ctx.backend.modifyEmails(account, {
-        accountName: parsed.account_name,
+      for (const id of parsed.email_ids) parseEmailId(id);
+      const moveTo = parsed.move_to_folder?.trim()
+        ? await resolveMoveTarget(ctx, account, parsed.move_to_folder)
+        : undefined;
+      const result = await ctx.backend.modifyEmails(account, {
         folder: parsed.folder,
         emailIds: parsed.email_ids,
         markRead: parsed.mark_read,
         markUnread: parsed.mark_unread,
         flag: parsed.flag,
         unflag: parsed.unflag,
-        moveToFolder: parsed.move_to_folder,
+        moveToFolder: moveTo,
       });
+      await bumpCache(ctx, account);
+      return { ...result, moved_to: moveTo ?? null };
     }
+
     case "emails_events": {
       const parsed = eventsSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
       const folder = parsed.folder?.trim() || "INBOX";
+      const limit = parsed.limit ?? 20;
+      if (parsed.after_uid !== undefined) {
+        const { messages, hasMore } = await ctx.backend.listNewSince(
+          account,
+          folder,
+          parsed.after_uid,
+          limit,
+        );
+        const next = messages.reduce((m, e) => Math.max(m, e.uid), parsed.after_uid);
+        return {
+          account: account.name,
+          folder,
+          count: messages.length,
+          next_after_uid: next,
+          has_more: hasMore,
+          messages,
+        };
+      }
       const result = await pollNewMessages({
         backend: ctx.backend,
         account,
         folder,
         cursors: ctx.cursors,
-        limit: parsed.limit ?? 20,
+        limit,
         advance: parsed.advance !== false,
       });
       return {
+        account: account.name,
         folder,
-        cursor: result.cursor,
-        advanced: result.advanced,
+        seeded: result.seeded,
         count: result.messages.length,
+        next_after_uid: result.cursor,
+        has_more: result.hasMore,
+        advanced: result.advanced,
         messages: result.messages,
       };
     }
+
+    case "email_draft": {
+      assertDraftAllowed(ctx.config, "email_draft");
+      const parsed = draftEmailSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      const compose: ReplyInput = {
+        to: parsed.to,
+        cc: parsed.cc,
+        bcc: parsed.bcc,
+        replyTo: parsed.reply_to,
+        subject: parsed.subject,
+        body: parsed.body,
+        bodyType: parsed.body_type,
+        fromEmail: parsed.from_email,
+        attachments: attachmentsArg(parsed.attachments),
+        replyAll: parsed.reply_all,
+        forward: parsed.forward,
+        quote: parsed.quote,
+        includeAttachments: parsed.include_attachments,
+      };
+      let msg: OutgoingMessage;
+      if (parsed.email_id) {
+        const original = await loadOriginal(
+          ctx,
+          account,
+          parsed.email_id,
+          Boolean(parsed.forward) && parsed.include_attachments !== false,
+        );
+        msg = composeReply(account, original, compose);
+      } else {
+        msg = composeNew(account, compose);
+      }
+      const drafts = await specialFolder(ctx, account, "drafts");
+      if (!drafts) {
+        throw new Error(
+          `no Drafts folder found for account "${account.name}"; set drafts_folder / DRAFTS_FOLDER`,
+        );
+      }
+      const { uid } = await ctx.backend.appendMessage(account, drafts, msg, ["\\Draft", "\\Seen"]);
+      await bumpCache(ctx, account);
+      return {
+        saved: true,
+        folder: drafts,
+        email_id: uid ? `${drafts}:${uid}` : null,
+        message_id: msg.messageId,
+        to: msg.to,
+        cc: msg.cc,
+        subject: msg.subject,
+      };
+    }
+
     case "email_send": {
       assertPushAllowed(ctx.config, "email_send");
       const parsed = sendEmailSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
       assertCanSend(account);
-      return ctx.backend.sendEmail(account, {
-        accountName: parsed.account_name,
+      const msg = composeNew(account, {
         to: parsed.to,
+        cc: parsed.cc,
+        bcc: parsed.bcc,
+        replyTo: parsed.reply_to,
         subject: parsed.subject,
         body: parsed.body,
         bodyType: parsed.body_type,
         fromEmail: parsed.from_email,
-        cc: parsed.cc,
-        bcc: parsed.bcc,
-        attachments: parsed.attachments?.map((a) => ({
-          filename: a.filename,
-          content: a.content,
-          contentType: a.content_type,
-        })),
+        attachments: attachmentsArg(parsed.attachments),
       });
+      return { sent: true, ...(await deliver(ctx, account, msg)) };
     }
+
     case "email_respond": {
       assertPushAllowed(ctx.config, "email_respond");
       const parsed = respondEmailSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
       assertCanSend(account);
-      return ctx.backend.respondEmail(account, {
-        accountName: parsed.account_name,
-        emailId: parsed.email_id,
-        folder: parsed.folder,
+      const original = await loadOriginal(
+        ctx,
+        account,
+        parsed.email_id,
+        Boolean(parsed.forward) && parsed.include_attachments !== false,
+      );
+      const msg = composeReply(account, original, {
+        to: parsed.to,
+        cc: parsed.cc,
+        bcc: parsed.bcc,
+        replyTo: parsed.reply_to,
+        subject: parsed.subject,
         body: parsed.body,
         bodyType: parsed.body_type,
+        fromEmail: parsed.from_email,
+        attachments: attachmentsArg(parsed.attachments),
         replyAll: parsed.reply_all,
         forward: parsed.forward,
-        to: parsed.to,
-        subject: parsed.subject,
+        quote: parsed.quote,
+        includeAttachments: parsed.include_attachments,
       });
+      const result = await deliver(ctx, account, msg);
+      if (!parsed.forward) {
+        try {
+          await ctx.backend.modifyEmails(account, {
+            emailIds: [parsed.email_id],
+            addFlags: ["\\Answered"],
+          });
+        } catch (error) {
+          result.warnings.push(`sent, but marking the original answered failed: ${errMessage(error)}`);
+        }
+      }
+      return {
+        sent: true,
+        kind: parsed.forward ? "forward" : parsed.reply_all ? "reply_all" : "reply",
+        in_reply_to: msg.inReplyTo ?? null,
+        ...result,
+      };
     }
+
     default:
       throw new Error(`unhandled tool: ${name}`);
   }
@@ -327,9 +584,8 @@ export function jsonToolResult(value: unknown) {
 }
 
 export function errorToolResult(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
   return {
     isError: true as const,
-    content: [{ type: "text" as const, text: message }],
+    content: [{ type: "text" as const, text: errMessage(error) }],
   };
 }

@@ -63,4 +63,40 @@ describe("loadRuntimeConfig", () => {
     });
     expect(config.accounts.default?.smtp).toBeUndefined();
   });
+
+  it("defaults to safe policy values", () => {
+    const config = loadRuntimeConfig({ IMAP_HOST: "h", IMAP_USER: "u", IMAP_PASS: "p", MAIL_MODE: "pull" });
+    expect(config).toMatchObject({
+      saveSent: "auto",
+      sendAllowlist: [],
+      maxBodyChars: 20_000,
+      attachmentMaxBytes: 2_000_000,
+      cacheTtlSeconds: 0,
+    });
+  });
+
+  it("accepts draft mode without SMTP and parses policy env", () => {
+    const config = loadRuntimeConfig({
+      EMAIL_ACCOUNTS_JSON: JSON.stringify({
+        me: {
+          imap: { host: "h", user: "u@x.com", password: "p" },
+          save_sent: false,
+          drafts_folder: "INBOX.Drafts",
+        },
+      }),
+      MAIL_MODE: "draft",
+      SAVE_SENT: "true",
+      SEND_ALLOWLIST: "corp.com, Boss@Gmail.com",
+    });
+    expect(config.mode).toBe("draft");
+    expect(config.saveSent).toBe("always");
+    expect(config.sendAllowlist).toEqual(["corp.com", "boss@gmail.com"]);
+    expect(config.accounts.me).toMatchObject({ saveSent: "never", draftsFolder: "INBOX.Drafts" });
+  });
+
+  it("rejects invalid MAIL_MODE and SAVE_SENT", () => {
+    const base = { IMAP_HOST: "h", IMAP_USER: "u", IMAP_PASS: "p" };
+    expect(() => loadRuntimeConfig({ ...base, MAIL_MODE: "push" })).toThrow(/MAIL_MODE/);
+    expect(() => loadRuntimeConfig({ ...base, MAIL_MODE: "pull", SAVE_SENT: "maybe" })).toThrow(/SAVE_SENT/);
+  });
 });
