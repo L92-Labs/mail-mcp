@@ -1,4 +1,4 @@
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
@@ -10,7 +10,7 @@ COPY packages/core packages/core
 COPY apps/node apps/node
 RUN pnpm --filter @mail-mcp/core build && pnpm --filter @mail-mcp/node build
 
-FROM node:22-alpine
+FROM node:26-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV MCP_TRANSPORT=http
