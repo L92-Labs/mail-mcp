@@ -12,8 +12,9 @@ CI and the manual fallback use the same publisher and tag policy.
 | Pull request | Tests and local Docker build; no registry login or publishing |
 
 `latest` follows the highest stable version among fetched Git tags. Fetch all tags
-before a manual publish. Avoid publishing different releases concurrently from
-different machines. Do not retag releases or rebuild historical tags routinely:
+before a manual publish. CI publishing is serialized across refs. Avoid publishing
+different releases concurrently from different machines or mixing a manual publish
+with an active CI publish. Do not retag releases or rebuild historical tags routinely:
 base images can change. Use `image@sha256:...` for an immutable deployment.
 No floating major/minor aliases while the project is below 1.0. SemVer build
 metadata (`+build`) is unsupported in image versions; the SHA tag identifies source.

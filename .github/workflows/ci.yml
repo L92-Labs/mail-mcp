@@ -67,6 +67,10 @@ jobs:
     needs: checks
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
+    # Serialize all refs: an older slow release must not overwrite newer latest.
+    concurrency:
+      group: mail-mcp-ghcr-publish
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
