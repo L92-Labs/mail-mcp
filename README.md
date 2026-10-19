@@ -3,6 +3,38 @@
 IMAP/SMTP **MCP** server for L92 Labs. Read, search, organize, draft, send, reply and forward
 across several mailboxes from one MCP endpoint. Stateless, configured entirely by env vars.
 
+Start here: [Docker quick start](#quick-start-published-image),
+[tool examples and troubleshooting](docs/usage.md),
+[releases and manual image publishing](docs/releases.md),
+[contributing](CONTRIBUTING.md), [security](SECURITY.md).
+
+## Quick start: published image
+
+Requires Docker Compose v2. Images become available after the first successful
+publish; public anonymous pulls require the GHCR package to be made public.
+
+```bash
+cp .env.example .env
+# Edit .env: real mail settings + strong MCP_BEARER_TOKEN; start with MAIL_MODE=draft.
+# Generate a bearer token: openssl rand -hex 32
+docker compose -f docker-compose.image.yml pull
+docker compose -f docker-compose.image.yml up -d
+curl --fail http://127.0.0.1:8787/health
+```
+
+Connect a Streamable HTTP MCP client to `http://127.0.0.1:8787/mcp` with
+`Authorization: Bearer <your-token>`. Remote clients need an HTTPS endpoint;
+use the tunnel recipe below with `-f docker-compose.image.yml`.
+`/health` checks server/config availability, not mailbox connectivity; call
+`accounts_list`, then `folders_list` to verify IMAP access.
+
+Set `MAIL_MCP_IMAGE=ghcr.io/l92-labs/mail-mcp:0.2.0` in `.env` to select a
+release, or use `ghcr.io/l92-labs/mail-mcp@sha256:<digest>` for a pinned image.
+Available tags: stable `latest`, exact SemVer, and `sha-<full-commit>`.
+Main-branch builds never move `latest`; prereleases never move it either.
+To build locally before images are published, use the original
+`docker compose up -d --build` recipe.
+
 | Runtime | Entry | Good for |
 |---------|--------|----------|
 | **Node / Docker** (primary) | Streamable HTTP `/mcp` or stdio | Any server, behind Cloudflare Tunnel + MCP portal |
@@ -56,7 +88,7 @@ Copy [`.env.example`](.env.example) → `.env`. Main variables:
 | `SAVE_SENT` | `auto` | `auto` / `true` / `false` |
 | `MAX_BODY_CHARS` | `20000` | `email_get` text cap (per call: `max_chars`) |
 | `ATTACHMENT_MAX_BYTES` | `2000000` | larger attachments are listed, content omitted |
-| `CACHE_TTL_SECONDS` | `0` | optional in-memory listing cache, invalidated on writes |
+| `CACHE_TTL_SECONDS` | `0` | optional listing cache (Node memory / Worker KV), invalidated on writes |
 | `EVENTS_POLL_SECONDS` | `0` | optional background cursor warm-up |
 
 Per-account folder overrides: `sent_folder`, `drafts_folder` (or `SENT_FOLDER`/`DRAFTS_FOLDER`). Otherwise they're resolved through IMAP special-use, then common names (incl. French).
@@ -107,6 +139,14 @@ pnpm deploy
 ```
 
 Workers can't use SMTP port 25 (use 587/465). `has_attachments=false` isn't supported there.
+Node/Docker is the primary deployment. Worker outbound TCP can also be blocked by
+provider/network restrictions; test your actual IMAP/SMTP hosts before choosing it.
+Set `MAIL_MODE=draft` and `EVENTS_POLL_SECONDS=0` in Wrangler vars for an initial
+draft-only deployment. Cron is configured separately in `wrangler.toml`.
+
+Events are polled with `emails_events`, not delivered through live MCP
+notifications. Keep your own `after_uid` cursor for reliable independent consumers;
+see [event semantics](docs/usage.md#events-and-cache).
 
 ## Test
 

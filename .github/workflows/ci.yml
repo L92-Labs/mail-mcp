@@ -1,0 +1,111 @@
+name: CI and containers
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mail-mcp-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      greenmail:
+        image: greenmail/standalone:2.1.3
+        env:
+          GREENMAIL_OPTS: '-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled=false -Dgreenmail.users=me:pw@example.com,alice:pw@corp.com -Dgreenmail.users.login=email'
+        ports:
+          - 13025:3025
+          - 13143:3143
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Wait for test mail server
+        run: |
+          for attempt in {1..60}; do
+            if (echo > /dev/tcp/127.0.0.1/13143) 2>/dev/null && (echo > /dev/tcp/127.0.0.1/13025) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - run: pnpm e2e
+      - name: Build Docker image (no publishing on PRs)
+        run: docker build --tag mail-mcp:ci .
+      - name: Smoke test read-only container
+        run: |
+          docker run -d --name mail-mcp-smoke --read-only -p 127.0.0.1:8787:8787 \
+            -e MAIL_MODE=pull -e MCP_BEARER_TOKEN=ci-token \
+            -e IMAP_HOST=imap.example.com -e IMAP_USER=test@example.com -e IMAP_PASS=dummy mail-mcp:ci
+          trap 'docker logs mail-mcp-smoke; docker rm -f mail-mcp-smoke' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:8787/health; then
+              test "$(curl --silent -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8787/mcp -d '{}')" = 401
+              exit $?
+            fi
+            sleep 1
+          done
+          exit 1
+
+  publish:
+    needs: checks
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    # Serialize all refs: an older slow release must not overwrite newer latest.
+    concurrency:
+      group: mail-mcp-ghcr-publish
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Validate release metadata before registry login
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=''
+          if [ "$REF_TYPE" = tag ]; then version="${REF_NAME#v}"; fi
+          node scripts/image-tags.mjs "$version"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish amd64 and arm64 manifest
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=''
+          if [ "$REF_TYPE" = tag ]; then version="${REF_NAME#v}"; fi
+          node scripts/publish-image.mjs --version "$version" --push
