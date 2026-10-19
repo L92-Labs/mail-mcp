@@ -53,13 +53,13 @@ git checkout v0.2.0
 # PAT classic: write:packages; authorize organization SSO if required.
 # Supply interactively; never commit or put the token on the command line.
 docker login ghcr.io -u YOUR_GITHUB_LOGIN
-docker buildx create --name mail-mcp-release --driver docker-container --use
-docker buildx inspect --bootstrap
+docker buildx create --name mail-mcp-release --driver docker-container
+docker buildx inspect mail-mcp-release --bootstrap
 # Confirm linux/amd64 and linux/arm64 are supported.
 # Linux hosts without emulation: this installs host binfmt handlers (privileged).
 # docker run --privileged --rm tonistiigi/binfmt --install arm64
-node scripts/publish-image.mjs --version 0.2.0         # inspect only
-node scripts/publish-image.mjs --version 0.2.0 --push  # build both + publish
+BUILDX_BUILDER=mail-mcp-release node scripts/publish-image.mjs --version 0.2.0         # inspect only
+BUILDX_BUILDER=mail-mcp-release node scripts/publish-image.mjs --version 0.2.0 --push  # build both + publish
 docker buildx imagetools inspect ghcr.io/l92-labs/mail-mcp:0.2.0
 docker buildx rm mail-mcp-release
 docker logout ghcr.io
