@@ -386,6 +386,42 @@ describe("folder management", () => {
     expect(deleted2).toEqual([]);
   });
 
+  it("folder_delete drops the event cursor of the deleted path", async () => {
+    const b = fakeBackend();
+    const ctx = makeCtx(b);
+    const deleted: string[] = [];
+    ctx.cursors = {
+      get: async () => null,
+      set: async () => {},
+      delete: async (key: string) => {
+        deleted.push(key);
+      },
+    };
+    await dispatchTool("folder_delete", { path: "Receipts", confirm: true }, ctx);
+    expect(deleted).toEqual(["events:uid:default:Receipts"]);
+  });
+
+  it("folder_rename migrates the event cursor to the new path", async () => {
+    const b = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "Receipts", newPath: "Finance/Receipts" })),
+    });
+    const ctx = makeCtx(b);
+    const sets = new Map<string, string>();
+    const deleted: string[] = [];
+    ctx.cursors = {
+      get: async (key: string) => (key === "events:uid:default:Receipts" ? "100" : null),
+      set: async (key: string, value: string) => {
+        sets.set(key, value);
+      },
+      delete: async (key: string) => {
+        deleted.push(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "Receipts", new_path: "Finance/Receipts" }, ctx);
+    expect(sets.get("events:uid:default:Finance/Receipts")).toBe("100");
+    expect(deleted).toEqual(["events:uid:default:Receipts"]);
+  });
+
   it("folder mutations invalidate the folders_list cache", async () => {
     const b = fakeBackend();
     const ctx = makeCtx(b, { cacheTtlSeconds: 120 }, account, true);

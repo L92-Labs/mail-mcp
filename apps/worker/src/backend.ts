@@ -415,10 +415,12 @@ export function createWorkerBackend(): MailBackend {
         const oldName = quoteMailbox(c.encodeMailboxName(path));
         const newName = quoteMailbox(c.encodeMailboxName(newPath));
         await mailboxCommand(client, `RENAME ${oldName} ${newName}`);
-        // Servers should move subscriptions along; enforce it best-effort.
+        // Subscribe the new path BEFORE dropping the old one: worst case is a
+        // harmless stale duplicate subscription, never a folder that is
+        // subscribed nowhere for subscribed-only clients.
         try {
-          await mailboxCommand(client, `UNSUBSCRIBE ${oldName}`);
           await mailboxCommand(client, `SUBSCRIBE ${newName}`);
+          await mailboxCommand(client, `UNSUBSCRIBE ${oldName}`);
         } catch {
           // best-effort
         }

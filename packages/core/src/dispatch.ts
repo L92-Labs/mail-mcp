@@ -412,6 +412,17 @@ export async function dispatchTool(
       assertFolderManageable(newPath, folders, "rename", protectedFolders(account, folders));
       const result = await ctx.backend.renameFolder(account, path, newPath);
       await bumpCache(ctx, account);
+      // RENAME moves the mailbox with its UIDs: migrate the poll cursor so the
+      // events stream continues seamlessly on the new path.
+      try {
+        const stored = await ctx.cursors.get(eventCursorKey(account.name, result.path));
+        if (stored !== null) {
+          await ctx.cursors.set(eventCursorKey(account.name, result.newPath), stored);
+          await ctx.cursors.delete?.(eventCursorKey(account.name, result.path));
+        }
+      } catch {
+        // best-effort
+      }
       return { renamed: true, folder: result.path, new_folder: result.newPath };
     }
 
@@ -426,6 +437,13 @@ export async function dispatchTool(
       const path = assertFolderManageable(parsed.path, folders, "delete", protectedFolders(account, folders));
       const result = await ctx.backend.deleteFolder(account, path);
       await bumpCache(ctx, account);
+      // Drop the poll cursor so a later recreation of this path re-seeds at
+      // the current watermark instead of hiding mail below the old one.
+      try {
+        await ctx.cursors.delete?.(eventCursorKey(account.name, result.path));
+      } catch {
+        // best-effort
+      }
       return { deleted: true, folder: result.path };
     }
 

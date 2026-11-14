@@ -424,7 +424,11 @@ export function createNodeBackend(): MailBackend {
           // exists. Probe before reporting failure so the result stays truthful.
           try {
             await client.mailboxOpen(path);
-            return { path, created: true };
+            // The folder exists, but from an ambiguous error we cannot prove
+            // this call created it; report created:false so callers never
+            // wipe live state (e.g. the event poll cursor) on uncertain
+            // evidence. A retry reports created:false again, harmlessly.
+            return { path, created: false };
           } catch {
             throw error;
           }
