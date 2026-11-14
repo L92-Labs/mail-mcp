@@ -621,7 +621,9 @@ export async function dispatchTool(
       const moveArg = parsed.move_to_folder;
       const folders = moveArg?.trim() ? await ctx.backend.listFolders(account) : undefined;
       const moveTo = folders && moveArg ? resolveMoveTarget(folders, moveArg) : undefined;
-      if (moveTo && folders && !folders.some((f) => f.path === moveTo)) {
+      // INBOX always exists (RFC 3501, case-insensitive token) — exempt
+      // from the listing-spelling existence check.
+      if (moveTo && folders && moveTo !== "INBOX" && !folders.some((f) => f.path === moveTo)) {
         throw new Error(
           `move target "${moveTo}" does not exist on the server; use folders_list for the available paths`,
         );
