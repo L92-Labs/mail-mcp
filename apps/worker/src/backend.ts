@@ -213,7 +213,8 @@ type CfImapInternals = {
   nextTag(): string;
   send(tag: string, line: string): Promise<void>;
   encodeMailboxName(name: string): string;
-  stream: { readUntilTag(tag: string): Promise<unknown> };
+  decodeMailboxName(name: string): string;
+  stream: { readUntilTag(tag: string): Promise<{ items?: Array<{ line?: string }> }> };
 };
 
 const internals = (client: CFImap): CfImapInternals => client as unknown as CfImapInternals;
@@ -236,6 +237,31 @@ async function mailboxCommand(client: CFImap, line: string): Promise<void> {
     await c.send(tag, line);
     await c.stream.readUntilTag(tag);
   });
+}
+
+/**
+ * Subscribed mailbox paths via LSUB — plain LIST does not establish
+ * subscription membership, and cf-imap exposes no LSUB API, so the untagged
+ * lines are parsed here. Best-effort: unparsable names are simply absent.
+ */
+async function subscribedPaths(client: CFImap): Promise<Set<string>> {
+  const c = internals(client);
+  const out = new Set<string>();
+  await c.command(async () => {
+    c.requireConnection();
+    const tag = c.nextTag();
+    await c.send(tag, `LSUB "" "*"`);
+    const { items } = await c.stream.readUntilTag(tag);
+    for (const item of items ?? []) {
+      const line = item.line ?? "";
+      if (!line.startsWith("* LSUB")) continue;
+      const quoted = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+      const raw = quoted.at(-1);
+      if (!raw) continue; // literals are not parsed; those names stay unmigrated
+      out.add(c.decodeMailboxName(raw.replace(/\\(["\\])/g, "$1")));
+    }
+  });
+  return out;
 }
 
 /** Servers signal duplicate CREATE with an [ALREADYEXISTS] code or plain text. */
@@ -428,15 +454,27 @@ export function createWorkerBackend(): MailBackend {
         } catch {
           // best-effort
         }
-        // Migrate exactly the children the server reports as subscribed; when
-        // the listing reports no subscription state at all, every mailbox is
+        // Migrate exactly the children the server reports as subscribed. LSUB
+        // is the source of truth when plain LIST carries no \Subscribed
+        // attributes (most servers); without any signal, every mailbox is
         // assumed subscribed (RFC 3501) and all children migrate.
         const reportsState = folders.some((f) => f.subscribed !== undefined);
+        let subscribedSet: Set<string> | null = null;
+        if (!reportsState) {
+          try {
+            subscribedSet = await subscribedPaths(client);
+          } catch {
+            // LSUB failed: fall back to the blanket RFC assumption.
+            subscribedSet = null;
+          }
+        }
         const oldChildren = folders
           .filter(
             (f) =>
               isDescendantFolder(f.path, path, folders) &&
-              (reportsState ? f.subscribed === true : true),
+              (reportsState
+                ? f.subscribed === true
+                : subscribedSet === null || subscribedSet.has(f.path)),
           )
           .map((f) => f.path);
         const oldName = quoteMailbox(c.encodeMailboxName(path));
