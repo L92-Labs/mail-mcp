@@ -1,4 +1,4 @@
-import { CFImap, type Email as CfEmail, type SearchEmailsProps } from "cf-imap";
+import { CFImap, type Email as CfEmail, type SearchEmailsProps, type ResponseItem } from "cf-imap";
 import { Email as MimeEmail, WorkerMailer } from "worker-mailer";
 import {
   isDescendantFolder,
@@ -214,7 +214,7 @@ type CfImapInternals = {
   send(tag: string, line: string): Promise<void>;
   encodeMailboxName(name: string): string;
   decodeMailboxName(name: string): string;
-  stream: { readUntilTag(tag: string): Promise<{ items?: Array<{ line?: string }> }> };
+  stream: { readUntilTag(tag: string): Promise<{ items?: ResponseItem[] }> };
 };
 
 const internals = (client: CFImap): CfImapInternals => client as unknown as CfImapInternals;
@@ -255,10 +255,14 @@ async function subscribedPaths(client: CFImap): Promise<Set<string>> {
     for (const item of items ?? []) {
       const line = item.line ?? "";
       if (!line.startsWith("* LSUB")) continue;
-      const quoted = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
-      const raw = quoted.at(-1);
-      if (!raw) continue; // literals are not parsed; those names stay unmigrated
-      out.add(c.decodeMailboxName(raw.replace(/\\(["\\])/g, "$1")));
+      if (item.literal != null) continue; // literal names stay unmigrated (best-effort)
+      const quoted = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)];
+      const last = quoted.at(-1);
+      if (!last) continue;
+      // The mailbox name must terminate the line; an unquoted atom after the
+      // last quoted token means the name was an astring we did not parse.
+      if (line.slice((last.index ?? 0) + last[0].length).trim() !== "") continue;
+      out.add(c.decodeMailboxName(last[1].replace(/\\(["\\])/g, "$1")));
     }
   });
   return out;
