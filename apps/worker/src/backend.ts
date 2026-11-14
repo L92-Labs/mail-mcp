@@ -278,7 +278,7 @@ export function createWorkerBackend(): MailBackend {
             name: f.name.split(f.delimiter || "/").pop() || f.name,
             path: f.name,
             specialUse: normalizeSpecialUse(f.attributes),
-            delimiter: f.delimiter || undefined,
+            delimiter: f.delimiter ?? "", // "" = NIL (explicitly flat)
             subscribed: f.attributes?.some((a) => a.toLowerCase() === "subscribed") || undefined,
           }),
         );
@@ -464,12 +464,12 @@ export function createWorkerBackend(): MailBackend {
           // entries feed the descendant filter and subscription migration.
           storedNames = raw.map((f) => ({
             name: f.name,
-            delimiter: f.delimiter || undefined,
+            delimiter: f.delimiter ?? "", // "" = NIL (explicitly flat)
           }));
           folders = raw.map((f) => ({
             name: f.name.split(f.delimiter || "/").pop() || f.name,
             path: f.name,
-            delimiter: f.delimiter || undefined,
+            delimiter: f.delimiter ?? "", // "" = NIL (explicitly flat)
             subscribed:
               f.attributes?.some((a) => a.toLowerCase() === "subscribed") || undefined,
           }));

@@ -29,15 +29,21 @@ export function assertNotInbox(value: string, action: "rename" | "delete"): void
   }
 }
 
-function sharedDelimiter(folders: FolderInfo[]): string {
-  return folders.find((f) => f.delimiter)?.delimiter ?? "";
+/** The namespace's reported delimiter: "" = explicitly flat (NIL);
+ *  undefined = the listing reported no delimiter information at all. */
+function sharedDelimiter(folders: FolderInfo[]): string | undefined {
+  const reported = folders.find((f) => f.delimiter !== undefined);
+  return reported?.delimiter;
 }
 
-/** Separator candidates for a folder: its own delimiter when known, else the account's. */
+/** Separator candidates for a folder: its own delimiter when known, else
+ *  the namespace's. An explicitly flat namespace ("" / NIL) yields no
+ *  separators — mailbox names are atomic and never have descendants. */
 function separatorsFor(path: string, folders: FolderInfo[]): string[] {
   const own = folders.find((f) => f.path === path)?.delimiter;
   const shared = sharedDelimiter(folders);
-  if (own || shared) return [own ?? shared];
+  if (own !== undefined) return own === "" ? [] : [own];
+  if (shared !== undefined) return shared === "" ? [] : [shared];
   return ["/", "."];
 }
 

@@ -58,7 +58,9 @@ export type FolderInfo = {
   path: string;
   /** Normalized RFC 6154 attribute, e.g. "\\Sent", "\\Drafts", "\\Trash". */
   specialUse?: string;
-  /** Hierarchy separator, e.g. "/" or "."; empty when the server reports none. */
+  /** Hierarchy separator, e.g. "/" or ".". "" = explicitly flat namespace
+   *  (NIL delimiter — mailbox names may contain "." and "/" as literal
+   *  characters); undefined = not reported by the server. */
   delimiter?: string;
   /** Subscription state; undefined when the server does not report it. */
   subscribed?: boolean;

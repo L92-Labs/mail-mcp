@@ -232,7 +232,7 @@ export function createNodeBackend(): MailBackend {
             name: b.name,
             path: b.path,
             specialUse: normalizeSpecialUse(b.specialUse),
-            delimiter: b.delimiter || undefined,
+            delimiter: b.delimiter ?? "", // "" = NIL (explicitly flat)
             subscribed: b.subscribed,
           }),
         );
@@ -450,7 +450,7 @@ export function createNodeBackend(): MailBackend {
           folders = (await client.list()).map((b) => ({
             name: b.name,
             path: b.path,
-            delimiter: b.delimiter || undefined,
+            delimiter: b.delimiter ?? "", // "" = NIL (explicitly flat)
             subscribed: b.subscribed,
           }));
         } catch {

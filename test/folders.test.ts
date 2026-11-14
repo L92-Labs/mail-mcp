@@ -3,6 +3,7 @@ import {
   assertFolderManageable,
   assertNotInbox,
   findProtectedFolder,
+  isDescendantFolder,
   isInboxPath,
   normalizeFolderPath,
   type FolderInfo,
@@ -143,5 +144,29 @@ describe("findProtectedFolder", () => {
 
   it("rejects control characters", () => {
     expect(() => findProtectedFolder("Sent\r\nX", FOLDERS, NO_PROTECTED)).toThrow(/control characters/);
+  });
+});
+
+
+describe("flat namespaces (NIL delimiter)", () => {
+  // "." and "/" are literal characters here — "Old.Child" is an unrelated
+  // sibling, never a descendant of "Old" (Codex P2, round 6.5r).
+  const flat: FolderInfo[] = [
+    { name: "Old", path: "Old", delimiter: "" },
+    { name: "Old.Child", path: "Old.Child", delimiter: "" },
+    { name: "New.Child", path: "New.Child", delimiter: "" },
+    { name: "Sent", path: "INBOX.Sent", delimiter: "", specialUse: "\\Sent" },
+  ];
+
+  it("infers no descendants in an explicitly flat namespace", () => {
+    expect(isDescendantFolder("Old.Child", "Old", flat)).toBe(false);
+    expect(isDescendantFolder("Old", "Old", flat)).toBe(false);
+  });
+
+  it("keeps destructive targeting exact on flat namespaces", () => {
+    // Deleting unrelated "Old" is allowed (protected INBOX.Sent untouched);
+    // the protected folder itself is refused (exact match, ci).
+    expect(assertFolderManageable("Old", flat, "delete")).toBe("Old");
+    expect(() => assertFolderManageable("INBOX.Sent", flat, "delete")).toThrow(/\\Sent folder/);
   });
 });
