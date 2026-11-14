@@ -194,9 +194,11 @@ export interface MailBackend {
     limit: number,
   ): Promise<{ messages: EmailMessage[]; hasMore: boolean }>;
   getHighestUid(account: EmailAccount, folder: string): Promise<number>;
-  /** IMAP CREATE. Parents are created by the server when missing. */
+  /** IMAP CREATE. Parents are created by the server when missing. Returns the
+   *  server-stored path (backends resolve namespace/case normalization). */
   createFolder(account: EmailAccount, path: string): Promise<{ path: string; created: boolean }>;
-  /** IMAP RENAME. Servers move child folders along (and INBOX has special semantics). */
+  /** IMAP RENAME. Servers move child folders along (and INBOX has special
+   *  semantics). Returned paths are server-stored/canonical. */
   renameFolder(account: EmailAccount, path: string, newPath: string): Promise<{ path: string; newPath: string }>;
   /** IMAP DELETE. The folder and its messages are removed; children may become unreachable. */
   deleteFolder(account: EmailAccount, path: string): Promise<{ path: string }>;

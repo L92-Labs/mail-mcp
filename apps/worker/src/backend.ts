@@ -424,13 +424,25 @@ export function createWorkerBackend(): MailBackend {
           if (isAlreadyExists(error)) return { path, created: false };
           throw error;
         }
-        // Subscribe so the folder shows up for clients listing subscribed mailboxes only.
+        // Resolve the server-stored path (namespace prefix / case may differ
+        // from the raw argument) so cursor keys and results use server truth.
+        let stored = path;
         try {
-          await mailboxCommand(client, `SUBSCRIBE ${name}`);
+          const after = await client.getFolders("", "*");
+          const hit =
+            after.find((f) => f.name === stored) ??
+            after.find((f) => f.name.toLowerCase() === stored.toLowerCase());
+          if (hit) stored = hit.name;
         } catch {
           // best-effort
         }
-        return { path, created: true };
+        // Subscribe so the folder shows up for clients listing subscribed mailboxes only.
+        try {
+          await mailboxCommand(client, `SUBSCRIBE ${quoteMailbox(c.encodeMailboxName(stored))}`);
+        } catch {
+          // best-effort
+        }
+        return { path: stored, created: true };
       });
     },
 
@@ -477,12 +489,24 @@ export function createWorkerBackend(): MailBackend {
         const oldName = quoteMailbox(c.encodeMailboxName(path));
         const newName = quoteMailbox(c.encodeMailboxName(newPath));
         await mailboxCommand(client, `RENAME ${oldName} ${newName}`);
-        const canonical = newPath;
+        // Resolve the server-stored destination path (namespace prefix / case
+        // may differ from the raw argument) so cursor keys and results use
+        // server truth.
+        let canonical = newPath;
+        try {
+          const after = await client.getFolders("", "*");
+          const hit =
+            after.find((f) => f.name === canonical) ??
+            after.find((f) => f.name.toLowerCase() === canonical.toLowerCase());
+          if (hit) canonical = hit.name;
+        } catch {
+          // best-effort
+        }
         // Subscribe the new path BEFORE dropping the old one: worst case is a
         // harmless stale duplicate subscription, never a folder that is
         // subscribed nowhere for subscribed-only clients.
         try {
-          await mailboxCommand(client, `SUBSCRIBE ${newName}`);
+          await mailboxCommand(client, `SUBSCRIBE ${quoteMailbox(c.encodeMailboxName(canonical))}`);
           await mailboxCommand(client, `UNSUBSCRIBE ${oldName}`);
         } catch {
           // best-effort

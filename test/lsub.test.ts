@@ -35,8 +35,11 @@ describe("parseLsubName", () => {
     expect(parseLsubName('* LSUB () "." {0}', new Uint8Array(0))).toBeNull();
   });
 
-  it("returns null for non-LSUB lines", () => {
+  it("returns null for non-LSUB lines (literals included)", () => {
     expect(parseLsubName("* OK IMAP4rev1 ready", null)).toBeNull();
     expect(parseLsubName('* STATUS "INBOX" (MESSAGES 3)', null)).toBeNull();
+    // Regression pin (pass-15 LOW): a literal body on a non-LSUB line must
+    // not be adopted as a subscribed path.
+    expect(parseLsubName("* STATUS () NIL {7}", new TextEncoder().encode("Archive"))).toBeNull();
   });
 });
