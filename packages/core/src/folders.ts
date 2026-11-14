@@ -102,21 +102,28 @@ export function isDescendantFolder(path: string, parent: string, folders: Folder
  * matches (caller treats it as server truth).
  */
 export function resolveStoredName(
-  after: Array<{ name: string; delimiter?: string }>,
+  after: Array<{ name?: string; path?: string; delimiter?: string }>,
   wanted: string,
 ): string {
   const lower = wanted.toLowerCase();
-  const exact = after.find((f) => f.name === wanted);
-  if (exact) return exact.name;
-  const ci = after.find((f) => f.name.toLowerCase() === lower);
-  if (ci) return ci.name;
+  const pathOf = (f: { name?: string; path?: string }): string => f.path ?? f.name ?? "";
+  const byPath = after.find((f) => pathOf(f) === wanted);
+  if (byPath) return pathOf(byPath);
+  const ciPath = after.find((f) => pathOf(f).toLowerCase() === lower);
+  if (ciPath) return pathOf(ciPath);
+  const byLeaf = after.find((f) => (f.name ?? "").toLowerCase() === lower);
+  if (byLeaf) return pathOf(byLeaf);
+  // Namespace-prefix suffix: stored "INBOX.Work/Foo" for wanted "Work/Foo" —
+  // the boundary may be the stored folder's own delimiter or either common
+  // separator (prefix convention varies per server).
   const prefixed = after.find((f) => {
-    const name = f.name.toLowerCase();
-    if (!name.endsWith(lower)) return false;
-    const boundary = name.charAt(name.length - lower.length - 1);
-    return boundary === f.delimiter?.toLowerCase() || boundary === "/" || boundary === ".";
+    const delim = f.delimiter;
+    const pathLower = pathOf(f).toLowerCase();
+    const seps = [delim, "/", "."].filter((s): s is string => Boolean(s));
+    return seps.some((s) => pathLower.endsWith(`${s.toLowerCase()}${lower}`));
   });
-  return prefixed?.name ?? wanted;
+  if (prefixed) return pathOf(prefixed);
+  return wanted;
 }
 
 /** True when `path` is an ancestor of `other` (servers rename/delete children along). */

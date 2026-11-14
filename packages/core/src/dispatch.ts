@@ -224,10 +224,14 @@ function protectedFolders(account: EmailAccount, folders: FolderInfo[]): Protect
   const seen = new Set(folders.filter((f) => f.specialUse).map((f) => f.path));
   for (const kind of ["sent", "drafts", "trash", "archive", "junk"] as const satisfies SpecialFolder[]) {
     const override = kind === "sent" ? account.sentFolder : kind === "drafts" ? account.draftsFolder : undefined;
-    const path = override ?? resolveSpecialFolder(folders, kind);
-    if (path && !seen.has(path)) {
-      seen.add(path);
-      resolved.push({ path, use: SPECIAL_USE[kind] });
+    const configured = override ?? resolveSpecialFolder(folders, kind);
+    if (!configured) continue;
+    // Resolve to the server-stored path (namespace prefix / case may differ
+    // from the configured value — delivery/listing use the canonical form).
+    const canonical = resolveStoredName(folders, configured);
+    if (!seen.has(canonical)) {
+      seen.add(canonical);
+      resolved.push({ path: canonical, use: SPECIAL_USE[kind] });
     }
   }
   return resolved;
