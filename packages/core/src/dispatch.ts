@@ -449,11 +449,17 @@ export async function dispatchTool(
       try {
         for (const f of sourceFolders) {
           const suffix = f.path.slice(sourceRoot.length);
-          const newKey = eventCursorKey(account.name, result.newPath + suffix);
           // The poller keys cursors by whatever folder string the caller
-          // passed to emails_events — the canonical listing path, or the
-          // raw (unprefixed) argument. Migrate every plausible spelling;
+          // passed to emails_events — the canonical listing path, the raw
+          // (unprefixed) argument, and after the rename the destination's
+          // canonical or raw spelling. Seed/clean every plausible spelling;
           // the highest watermark wins.
+          const newKeys = [
+            ...new Set([
+              eventCursorKey(account.name, result.newPath + suffix),
+              eventCursorKey(account.name, newPath + suffix),
+            ]),
+          ];
           const oldKeys = [
             ...new Set([
               eventCursorKey(account.name, f.path),
@@ -465,12 +471,12 @@ export async function dispatchTool(
           ).filter((v): v is string => v !== null);
           if (storedValues.length) {
             const watermark = String(Math.max(...storedValues.map((v) => Number(v))));
-            await ctx.cursors.set(newKey, watermark);
+            for (const k of newKeys) await ctx.cursors.set(k, watermark);
             for (const k of oldKeys) await ctx.cursors.delete?.(k);
           } else {
             // The moved folder's history is the source's: a residual cursor
             // at its destination path is stale by definition.
-            await ctx.cursors.delete?.(newKey);
+            for (const k of newKeys) await ctx.cursors.delete?.(k);
           }
         }
       } catch {

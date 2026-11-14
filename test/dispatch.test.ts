@@ -687,9 +687,39 @@ describe("folder management", () => {
       },
     };
     await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work" }, ctx);
+    // Both destination spellings seeded (canonical INBOX.Archive/Work and
+    // raw Archive/Work) so alias-polling callers keep their watermark.
     expect(sets.get("events:uid:default:INBOX.Archive/Work")).toBe("100");
-    expect(deleted).toEqual(expect.arrayContaining(["events:uid:default:INBOX.Work"]));
-    expect(sets.has("events:uid:default:Archive/Work")).toBe(false);
+    expect(sets.get("events:uid:default:Archive/Work")).toBe("100");
+    // Both source spellings cleaned: canonical INBOX.Work, and the raw
+    // unprefixed argument Work (inert here — no cursor was seeded for it).
+    expect(deleted).toEqual([
+      "events:uid:default:INBOX.Work",
+      "events:uid:default:Work",
+    ]);
+
+    // No source cursor: both destination spellings hygiene-deleted anyway.
+    const b2 = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "INBOX.Work", newPath: "INBOX.Archive/Work2" })),
+      listFolders: vi.fn(async () => [
+        { name: "Work", path: "INBOX.Work", delimiter: "." },
+      ]),
+    });
+    const ctx2 = makeCtx(b2);
+    const deleted2: string[] = [];
+    ctx2.cursors = {
+      get: async () => null,
+      set: async () => {},
+      delete: async (key: string) => {
+        deleted2.push(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work2" }, ctx2);
+    // No source cursor: both destination spellings hygiene-deleted anyway.
+    expect(deleted2).toEqual([
+      "events:uid:default:INBOX.Archive/Work2",
+      "events:uid:default:Archive/Work2",
+    ]);
   });
 
   it("folder_rename migrates descendant cursors and drops stale destination cursors", async () => {
