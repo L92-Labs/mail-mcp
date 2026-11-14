@@ -1,6 +1,7 @@
 import { CFImap, type Email as CfEmail, type SearchEmailsProps } from "cf-imap";
 import { Email as MimeEmail, WorkerMailer } from "worker-mailer";
 import {
+  isDescendantFolder,
   KNOWN_SPECIAL_USE,
   extractAddress,
   htmlToText,
@@ -412,9 +413,25 @@ export function createWorkerBackend(): MailBackend {
     async renameFolder(account, path, newPath) {
       return withImap(account, async (client) => {
         const c = internals(client);
+        // Children follow the rename, but subscriptions do not (RFC 3501 §6.3.6):
+        // capture descendants before, resubscribe at the new paths after.
+        let folders: FolderInfo[] = [];
+        try {
+          folders = (await client.getFolders("", "*")).map((f) => ({
+            name: f.name.split(f.delimiter || "/").pop() || f.name,
+            path: f.name,
+            delimiter: f.delimiter || undefined,
+          }));
+        } catch {
+          // best-effort
+        }
+        const oldChildren = folders
+          .filter((f) => isDescendantFolder(f.path, path, folders))
+          .map((f) => f.path);
         const oldName = quoteMailbox(c.encodeMailboxName(path));
         const newName = quoteMailbox(c.encodeMailboxName(newPath));
         await mailboxCommand(client, `RENAME ${oldName} ${newName}`);
+        const canonical = newPath;
         // Subscribe the new path BEFORE dropping the old one: worst case is a
         // harmless stale duplicate subscription, never a folder that is
         // subscribed nowhere for subscribed-only clients.
@@ -424,7 +441,16 @@ export function createWorkerBackend(): MailBackend {
         } catch {
           // best-effort
         }
-        return { path, newPath };
+        for (const child of oldChildren) {
+          try {
+            const newChild = quoteMailbox(c.encodeMailboxName(`${canonical}${child.slice(path.length)}`));
+            await mailboxCommand(client, `SUBSCRIBE ${newChild}`);
+            await mailboxCommand(client, `UNSUBSCRIBE ${quoteMailbox(c.encodeMailboxName(child))}`);
+          } catch {
+            // best-effort
+          }
+        }
+        return { path, newPath: canonical };
       });
     },
 

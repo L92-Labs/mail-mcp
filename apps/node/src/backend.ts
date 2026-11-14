@@ -10,6 +10,7 @@ import nodemailer from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import type Mail from "nodemailer/lib/mailer/index.js";
 import {
+  isDescendantFolder,
   KNOWN_SPECIAL_USE,
   formatAddress,
   htmlToText,
@@ -440,17 +441,39 @@ export function createNodeBackend(): MailBackend {
 
     async renameFolder(account, path, newPath) {
       return withImap(account, async (client) => {
-        const res = await client.mailboxRename(path, newPath);
-        // imapflow's RENAME does not touch subscriptions, and servers only
-        // SHOULD move them (RFC 3501): subscribe the new path before dropping
-        // the old one — worst case is a stale duplicate subscription.
+        // Children follow the rename, but subscriptions do not (RFC 3501 §6.3.6
+        // SUBSCRIBE is per-mailbox, not hierarchical): capture descendants
+        // before, resubscribe at the new paths after — all best-effort.
+        let folders: FolderInfo[] = [];
         try {
-          const subscribed = await client.mailboxSubscribe(newPath);
+          folders = (await client.list()).map((b) => ({
+            name: b.name,
+            path: b.path,
+            delimiter: b.delimiter || undefined,
+          }));
+        } catch {
+          // best-effort
+        }
+        const oldChildren = folders
+          .filter((f) => isDescendantFolder(f.path, path, folders))
+          .map((f) => f.path);
+        const res = await client.mailboxRename(path, newPath);
+        const canonical = res?.newPath ?? newPath;
+        try {
+          const subscribed = await client.mailboxSubscribe(canonical);
           if (subscribed !== false) await client.mailboxUnsubscribe(path);
         } catch {
           // best-effort
         }
-        return { path: res?.path ?? path, newPath: res?.newPath ?? newPath };
+        for (const child of oldChildren) {
+          try {
+            await client.mailboxSubscribe(`${canonical}${child.slice(path.length)}`);
+            await client.mailboxUnsubscribe(child);
+          } catch {
+            // best-effort
+          }
+        }
+        return { path: res?.path ?? path, newPath: canonical };
       });
     },
 

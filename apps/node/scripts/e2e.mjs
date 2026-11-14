@@ -296,6 +296,28 @@ async function main() {
     const createSpaces = await call("folder_create", { path: " Receipts " });
     check("create with surrounding whitespace refused", typeof createSpaces.__error === "string" && createSpaces.__error.includes("whitespace"), createSpaces);
 
+    // Subscription continuity: children follow the rename, subscriptions don't
+    const parent = `INBOX${delim}E2EP`;
+    await call("folder_create", { path: parent });
+    await call("folder_create", { path: `${parent}${delim}Sub` });
+    await imap("me@example.com", async (client) => {
+      await client.mailboxSubscribe(parent);
+      await client.mailboxSubscribe(`${parent}${delim}Sub`);
+    });
+    const renamedParent = `INBOX${delim}E2ERenamed`;
+    await call("folder_rename", { path: parent, new_path: renamedParent });
+    const subState = await imap("me@example.com", async (client) => {
+      const boxes = await client.list();
+      return Object.fromEntries(boxes.filter((b) => b.path.includes("E2E")).map((b) => [b.path, b.subscribed]));
+    });
+    check(
+      "rename migrates parent + child subscriptions",
+      subState[renamedParent] === true && subState[`${renamedParent}${delim}Sub`] === true,
+      subState,
+    );
+    await call("folder_delete", { path: renamedParent, confirm: true });
+    await call("folder_delete", { path: `${renamedParent}${delim}Sub`, confirm: true });
+
     // Events: stateless watermark
     const seed = await call("emails_events", {});
     check("events: first call seeds", seed.seeded === true && seed.count === 0 && seed.next_after_uid > 0, seed);
