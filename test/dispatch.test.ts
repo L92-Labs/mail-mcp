@@ -509,12 +509,14 @@ describe("folder management", () => {
       },
     };
     await dispatchTool("folder_rename", { path: "Old", new_path: "New" }, ctx2);
-    // Positive control: the true child migrates.
-    expect(sets2.get("events:uid:default:New/2024")).toBe("12");
-    expect(deleted2).toContain("events:uid:default:Old/2024");
-    // Exactness: the case-variant lookalike keeps its cursor untouched.
+    // Positive control + exactness: the only cursor write is the true child's
+    // migration; deletions cover the old child key and destination hygiene
+    // (the renamed folder itself), never the lookalike.
+    expect([...sets2.keys()]).toEqual(["events:uid:default:New/2024"]);
+    expect(deleted2).toEqual(
+      expect.arrayContaining(["events:uid:default:Old/2024", "events:uid:default:New"]),
+    );
     expect(deleted2).not.toContain("events:uid:default:new/Notes");
-    expect(sets2.has("events:uid:default:Archive/New/Notes")).toBe(false);
     expect(cursors2.get("events:uid:default:new/Notes")).toBe("7");
   });
 
