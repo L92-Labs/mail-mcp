@@ -105,22 +105,17 @@ export function resolveStoredName(
   after: Array<{ name?: string; path?: string; delimiter?: string }>,
   wanted: string,
 ): string {
-  const lower = wanted.toLowerCase();
   const pathOf = (f: { name?: string; path?: string }): string => f.path ?? f.name ?? "";
   const byPath = after.find((f) => pathOf(f) === wanted);
   if (byPath) return pathOf(byPath);
-  const ciPath = after.find((f) => pathOf(f).toLowerCase() === lower);
-  if (ciPath) return pathOf(ciPath);
   // Namespace-prefix convention: personal mailboxes on prefixed servers are
   // stored as "INBOX.<wanted>" (or "INBOX<delimiter><wanted>" with the
   // server's own delimiter). Anything else — e.g. unrelated "Reports.2026"
   // for wanted "2026" — must NOT resolve, or destructive operations would
   // act on an unrelated mailbox.
   const inboxPrefixed = after.find((f) => {
-    const pathLower = pathOf(f).toLowerCase();
-    if (pathLower === `inbox.${lower}`) return true;
-    const delim = f.delimiter?.toLowerCase();
-    return Boolean(delim) && pathLower === `inbox${delim}${lower}`;
+    const p = pathOf(f);
+    return p.slice(0, 6).toLowerCase() === "inbox." && p.slice(6) === wanted;
   });
   if (inboxPrefixed) return pathOf(inboxPrefixed);
   return wanted;
@@ -140,8 +135,6 @@ export function resolveProtectedName(
   const pathOf = (f: { name?: string; path?: string }): string => f.path ?? f.name ?? "";
   const byPath = after.find((f) => pathOf(f) === wanted);
   if (byPath) return pathOf(byPath);
-  const ciPath = after.find((f) => pathOf(f).toLowerCase() === lower);
-  if (ciPath) return pathOf(ciPath);
   const byLeaf = after.find((f) => (f.name ?? "").toLowerCase() === lower);
   if (byLeaf) return pathOf(byLeaf);
   const prefixed = after.find((f) => {

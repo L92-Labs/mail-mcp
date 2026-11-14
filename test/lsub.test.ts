@@ -63,9 +63,11 @@ describe("resolveStoredName", () => {
     { name: "Archive", path: "Archive", delimiter: "/" },
   ];
 
-  it("resolves exact and case-insensitive full paths", () => {
+  it("resolves exact full paths only (never case substitution)", () => {
     expect(resolveStoredName(listing, "Archive")).toBe("Archive");
-    expect(resolveStoredName(listing, "archive")).toBe("Archive");
+    // Case variants are not substituted into destructive targets: the
+    // backend acts on the raw name and the server errors harmlessly.
+    expect(resolveStoredName(listing, "archive")).toBe("archive");
     expect(resolveStoredName(listing, "INBOX.Sent")).toBe("INBOX.Sent");
   });
 
