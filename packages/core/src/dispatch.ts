@@ -29,7 +29,7 @@ import {
   isInboxPath,
   normalizeFolderPath,
   rejectSeparatorTricks,
-  resolveProtectedName,
+  resolveProtectedCandidates,
   resolveStoredName,
   type ProtectedFolder,
 } from "./folders.js";
@@ -227,13 +227,15 @@ function protectedFolders(account: EmailAccount, folders: FolderInfo[]): Protect
     const override = kind === "sent" ? account.sentFolder : kind === "drafts" ? account.draftsFolder : undefined;
     const configured = override ?? resolveSpecialFolder(folders, kind);
     if (!configured) continue;
-    // Resolve to the server-stored path (namespace prefix / case may differ
-    // from the configured value — delivery/listing use the canonical form).
-    // Guard direction: over-resolving only widens protection.
-    const canonical = resolveProtectedName(folders, configured);
-    if (!seen.has(canonical)) {
-      seen.add(canonical);
-      resolved.push({ path: canonical, use: SPECIAL_USE[kind] });
+    // Resolve to every plausible server-stored path (namespace prefix /
+    // case / duplicate leaf names may differ from the configured value —
+    // delivery/listing use the canonical form). Guard direction:
+    // over-protecting only widens the guard; under-protecting is the bug.
+    for (const candidate of resolveProtectedCandidates(folders, configured)) {
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        resolved.push({ path: candidate, use: SPECIAL_USE[kind] });
+      }
     }
   }
   return resolved;

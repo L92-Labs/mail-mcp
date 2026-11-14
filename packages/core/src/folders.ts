@@ -136,29 +136,42 @@ export function resolveStoredName(
 }
 
 /**
- * Guard-direction resolution: like resolveStoredName, but the namespace
- * suffix falls back to any common delimiter boundary — over-resolving is
- * safe here (the result only ever widens protection), while under-resolving
- * would leave the real folder unprotected.
+ * Guard-direction resolution: like resolveStoredName, but returns EVERY
+ * plausible stored path for the configured value — exact/case-insensitive
+ * full path, exact/case-insensitive leaf name, and delimiter-bounded
+ * namespace suffix. Over-resolving is safe here (the result only ever
+ * widens protection), while under-resolving or first-match-wins would
+ * leave the real configured folder unprotected when leaf names duplicate.
  */
-export function resolveProtectedName(
+export function resolveProtectedCandidates(
   after: Array<{ name?: string; path?: string; delimiter?: string }>,
   wanted: string,
-): string {
+): string[] {
   const lower = wanted.toLowerCase();
   const pathOf = (f: { name?: string; path?: string }): string => f.path ?? f.name ?? "";
+  const matches = new Map<string, string>();
+  // The configured value itself is always protected verbatim — even when
+  // the listing doesn't contain it (delivery may target a not-yet-listed
+  // or differently-normalized path).
+  matches.set(lower, wanted);
   const byPath = after.find((f) => pathOf(f) === wanted);
-  if (byPath) return pathOf(byPath);
-  const byLeaf = after.find((f) => (f.name ?? "").toLowerCase() === lower);
-  if (byLeaf) return pathOf(byLeaf);
-  const prefixed = after.find((f) => {
+  if (byPath) matches.set(wanted, pathOf(byPath));
+  for (const f of after) {
+    const p = pathOf(f);
+    const pLower = p.toLowerCase();
+    if (pLower === lower || (f.name ?? "").toLowerCase() === lower) {
+      matches.set(pLower, p);
+      continue;
+    }
+    // Guard direction: the namespace-suffix boundary may be the entry's own
+    // delimiter or either common separator (prefix conventions vary) —
+    // over-protecting only widens the guard; corruption safety for
+    // destructive targeting lives in resolveStoredName (exact-only).
     const delim = f.delimiter;
-    const pathLower = pathOf(f).toLowerCase();
     const seps = [delim, "/", "."].filter((s): s is string => Boolean(s));
-    return seps.some((s) => pathLower.endsWith(`${s.toLowerCase()}${lower}`));
-  });
-  if (prefixed) return pathOf(prefixed);
-  return wanted;
+    if (seps.some((s) => pLower.endsWith(`${s.toLowerCase()}${lower}`))) matches.set(pLower, p);
+  }
+  return [...matches.values()];
 }
 
 /** True when `path` is an ancestor of `other` (servers rename/delete children along). */

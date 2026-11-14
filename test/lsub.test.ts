@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveProtectedName, resolveStoredName } from "@mail-mcp/core";
+import { resolveProtectedCandidates, resolveStoredName } from "@mail-mcp/core";
 import { parseLsubName } from "../apps/worker/src/lsub.js";
 
 // Worker-runtime module (cf-imap has no folder-management API), so the LSUB
@@ -93,6 +93,18 @@ describe("resolveStoredName", () => {
     expect(resolveStoredName(flat, "receipts")).toBe("receipts");
   });
 
+  it("INBOX.X on a flat/unreported namespace never resolves (discriminating pin)", () => {
+    // The listing contains ONLY INBOX.Receipts — no exact Receipts entry —
+    // so the byPath stage cannot short-circuit: a pre-fix resolver would
+    // return INBOX.Receipts (the Codex P1 corruption shape); the delimiter
+    // guard must return the raw name instead.
+    const flatOnlyInbox = [{ name: "INBOX.Receipts", path: "INBOX.Receipts", delimiter: "" }];
+    expect(resolveStoredName(flatOnlyInbox, "Receipts")).toBe("Receipts");
+    // Unreported delimiter (undefined) takes the same fail-closed branch.
+    const unreported = [{ name: "INBOX.Receipts", path: "INBOX.Receipts" }];
+    expect(resolveStoredName(unreported, "Receipts")).toBe("Receipts");
+  });
+
   it("INBOX.X on a slash-delimiter hierarchical server resolves (convention)", () => {
     const slash = [
       { name: "Sent", path: "INBOX/Sent", delimiter: "/" },
@@ -105,21 +117,36 @@ describe("resolveStoredName", () => {
   });
 });
 
-describe("resolveProtectedName", () => {
+describe("resolveProtectedCandidates", () => {
   // Non-INBOX namespace prefix (e.g. Courier "Folders."): the guard
   // resolution over-protects — a bare-leaf override resolves onto the
-  // prefixed stored path.
+  // prefixed stored path. The configured value itself is always included
+  // verbatim (protection applies even when the listing lacks it).
   const listing = [
     { name: "Folders.Sent", path: "Folders.Sent", delimiter: "." },
     { name: "Folders.Work/Foo", path: "Folders.Work/Foo", delimiter: "/" },
   ];
 
-  it("resolves bare-leaf overrides onto prefixed stored paths", () => {
-    expect(resolveProtectedName(listing, "Sent")).toBe("Folders.Sent");
-    expect(resolveProtectedName(listing, "Work/Foo")).toBe("Folders.Work/Foo");
+  it("resolves bare-leaf overrides onto prefixed stored paths (plus verbatim)", () => {
+    const got = resolveProtectedCandidates(listing, "Sent");
+    expect(got).toEqual(expect.arrayContaining(["Sent", "Folders.Sent"]));
   });
 
-  it("falls back to the wanted name when nothing matches", () => {
-    expect(resolveProtectedName(listing, "Nope")).toBe("Nope");
+  it("resolves composite overrides onto prefixed stored paths (plus verbatim)", () => {
+    const got = resolveProtectedCandidates(listing, "Work/Foo");
+    expect(got).toEqual(expect.arrayContaining(["Work/Foo", "Folders.Work/Foo"]));
+  });
+
+  it("no listing match still protects the configured value verbatim", () => {
+    expect(resolveProtectedCandidates(listing, "Nope")).toEqual(["Nope"]);
+  });
+
+  it("duplicate leaf names protect every candidate (plus verbatim)", () => {
+    const dup = [
+      { name: "Other", path: "Folders.Other.Sent", delimiter: "." },
+      { name: "Sent", path: "Folders.Sent", delimiter: "." },
+    ];
+    const got = resolveProtectedCandidates(dup, "Sent");
+    expect(got).toEqual(expect.arrayContaining(["Folders.Other.Sent", "Folders.Sent", "Sent"]));
   });
 });
