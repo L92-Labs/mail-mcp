@@ -25,7 +25,7 @@ function createContext(env: WorkerEnv): DispatchContext {
 
 export function buildMcpServer(env: WorkerEnv, request: Request): McpServer {
   const ctx = createContext(env);
-  const server = new McpServer({ name: "mail-mcp", version: "0.3.0" });
+  const server = new McpServer({ name: "mail-mcp", version: "0.3.1" });
 
   for (const tool of enabledToolMeta(ctx.config)) {
     server.registerTool(
