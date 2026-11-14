@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 // End-to-end check against a real IMAP/SMTP server (GreenMail), through the MCP HTTP endpoint.
+// Easiest run: `pnpm e2e:local` (starts GreenMail, runs the suite, tears down; see scripts/e2e.sh).
+// CI runs this same suite against a GreenMail service container on every PR.
+// Manual server run, when you manage the container yourself:
 //   docker run -d --rm --name mailmcp-greenmail -p 127.0.0.1:13025:3025 -p 127.0.0.1:13143:3143 \
 //     -e GREENMAIL_OPTS='-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled=false -Dgreenmail.users=me:pw@example.com,alice:pw@corp.com -Dgreenmail.users.login=email' \
 //     greenmail/standalone:2.1.3

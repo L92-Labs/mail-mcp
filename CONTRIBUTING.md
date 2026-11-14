@@ -10,9 +10,10 @@ pnpm typecheck
 pnpm test
 ```
 
-For changes to mail behavior, run `pnpm e2e` against an isolated GreenMail
-container; setup is documented at the top of `apps/node/scripts/e2e.mjs`.
-Never run that suite against a real mailbox: it sends and moves test mail.
+For changes to mail behavior, run `pnpm e2e:local` — it starts an isolated
+GreenMail container, runs the full suite and tears it down (`pnpm e2e` expects
+the container to be already running; CI provides it as a service). Never run
+that suite against a real mailbox: it sends and moves test mail.
 
 Open a pull request with the problem, change and verification. Keep both Node
 and Worker behavior consistent, or document any runtime limitation. Never add

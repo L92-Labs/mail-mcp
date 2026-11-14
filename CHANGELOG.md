@@ -17,6 +17,8 @@
   delimiter for building nested paths.
 - Duplicate `folder_create` returns `created: false` consistently on both
   runtimes (ALREADYEXISTS / "already exists" detection).
+- `pnpm e2e:local` reproduces the CI GreenMail e2e suite locally with one
+  command (container lifecycle, readiness wait, teardown, port overrides).
 
 ## 0.2.0 — 2026-10-19
 

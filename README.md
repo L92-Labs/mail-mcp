@@ -156,8 +156,7 @@ see [event semantics](docs/usage.md#events-and-cache).
 ```bash
 pnpm test        # unit tests
 pnpm typecheck
-# real IMAP/SMTP end-to-end (GreenMail in Docker; see header of apps/node/scripts/e2e.mjs)
-pnpm e2e
+pnpm e2e:local   # real IMAP/SMTP end-to-end: starts GreenMail in Docker, runs the suite, tears down
 # same suite against the Worker: E2E_URL=http://127.0.0.1:8798 node apps/node/scripts/e2e.mjs
 ```
 
