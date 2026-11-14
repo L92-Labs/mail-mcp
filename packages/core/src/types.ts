@@ -209,4 +209,6 @@ export interface CacheStore {
 export interface CursorStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
+  /** Best-effort removal (folder_create resets the poll cursor on recreate). */
+  delete?(key: string): Promise<void>;
 }

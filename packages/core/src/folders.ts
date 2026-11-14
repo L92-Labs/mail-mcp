@@ -11,6 +11,11 @@ export function isInboxPath(path: string): boolean {
 export function normalizeFolderPath(value: string): string {
   const path = value.trim();
   if (!path) throw new Error("folder path is empty");
+  // IMAP names may legitimately contain leading/trailing spaces (RFC 3501 §5.1);
+  // trimming silently would let " Receipts " delete "Receipts". Fail closed.
+  if (path !== value) {
+    throw new Error("folder path has leading/trailing whitespace; pass the exact path from folders_list");
+  }
   if (CONTROL_CHARS.test(path)) throw new Error("folder path contains control characters");
   return path;
 }
@@ -44,7 +49,7 @@ function isParentOf(path: string, other: string, folders: FolderInfo[]): boolean
 }
 
 /** Separator aliasing ("Sent/", "Clients//Sent") must fail closed, never normalize into a protected folder. */
-function rejectSeparatorTricks(path: string, folders: FolderInfo[]): void {
+export function rejectSeparatorTricks(path: string, folders: FolderInfo[]): void {
   const seps = [
     ...new Set([sharedDelimiter(folders), ...folders.map((f) => f.delimiter)].filter((d): d is string => Boolean(d))),
   ];

@@ -291,6 +291,10 @@ async function main() {
     check("trailing-delimiter aliasing refused", typeof delSentSlash.__error === "string" && delSentSlash.__error.includes("must not end with"), delSentSlash);
     const crlf = await call("folder_create", { path: "Receipts\r\nB1 DELETE Sent" });
     check("control characters refused before IMAP", typeof crlf.__error === "string" && crlf.__error.includes("control characters"), crlf);
+    const createSentSlash = await call("folder_create", { path: `Sent${delim}` });
+    check("create-side separator aliasing refused", typeof createSentSlash.__error === "string" && createSentSlash.__error.includes("must not end with"), createSentSlash);
+    const createSpaces = await call("folder_create", { path: " Receipts " });
+    check("create with surrounding whitespace refused", typeof createSpaces.__error === "string" && createSpaces.__error.includes("whitespace"), createSpaces);
 
     // Events: stateless watermark
     const seed = await call("emails_events", {});

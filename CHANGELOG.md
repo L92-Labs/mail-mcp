@@ -17,6 +17,14 @@
   delimiter for building nested paths.
 - Duplicate `folder_create` returns `created: false` consistently on both
   runtimes (ALREADYEXISTS / "already exists" detection).
+- Review round 3: folder paths with surrounding whitespace are refused (exact
+  mailbox names are never silently trimmed); create-side separator aliasing is
+  refused like rename/delete; the event poll cursor is reset when a folder is
+  created so recreated folders don't lose events; cache invalidation is
+  collision-safe (random generation) and best-effort (a failed cache write
+  never masks a successful mutation); the Workers delete unsubscribes only
+  after a successful DELETE; Node create probes existence when imapflow's
+  internal SUBSCRIBE fails after a successful CREATE.
 - `pnpm e2e:local` reproduces the CI GreenMail e2e suite locally with one
   command (container lifecycle, readiness wait, teardown, port overrides).
 

@@ -29,9 +29,14 @@ describe("isInboxPath", () => {
 });
 
 describe("normalizeFolderPath", () => {
-  it("trims and rejects empty paths", () => {
-    expect(normalizeFolderPath("  A/B  ")).toBe("A/B");
+  it("rejects empty paths", () => {
     expect(() => normalizeFolderPath("   ")).toThrow(/empty/);
+  });
+
+  it("rejects leading/trailing whitespace instead of trimming (exact mailbox names)", () => {
+    expect(() => normalizeFolderPath("  A/B  ")).toThrow(/leading\/trailing whitespace/);
+    expect(() => normalizeFolderPath("Receipts ")).toThrow(/whitespace/);
+    expect(normalizeFolderPath("A/B")).toBe("A/B");
   });
 
   it("rejects control characters (IMAP command framing)", () => {
@@ -45,7 +50,9 @@ describe("normalizeFolderPath", () => {
 describe("assertNotInbox", () => {
   it("refuses INBOX for both actions without contacting the server", () => {
     for (const action of ["rename", "delete"] as const) {
-      expect(() => assertNotInbox(" inbox ", action)).toThrow(/INBOX cannot/);
+      expect(() => assertNotInbox("inbox", action)).toThrow(/INBOX cannot/);
+      // Whitespace-carrying variants fail closed too (exact-names rule).
+      expect(() => assertNotInbox(" inbox ", action)).toThrow(/whitespace/);
     }
     expect(() => assertNotInbox("Receipts", "delete")).not.toThrow();
   });
@@ -53,8 +60,9 @@ describe("assertNotInbox", () => {
 
 describe("assertFolderManageable", () => {
   it("allows regular folders and returns the normalized path", () => {
-    expect(assertFolderManageable(" Receipts ", FOLDERS, "delete", NO_PROTECTED)).toBe("Receipts");
+    expect(assertFolderManageable("Receipts", FOLDERS, "delete", NO_PROTECTED)).toBe("Receipts");
     expect(assertFolderManageable("INBOX/Sub", FOLDERS, "rename", NO_PROTECTED)).toBe("INBOX/Sub");
+    expect(() => assertFolderManageable(" Receipts ", FOLDERS, "delete", NO_PROTECTED)).toThrow(/whitespace/);
   });
 
   it("refuses INBOX for rename and delete", () => {

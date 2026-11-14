@@ -430,12 +430,14 @@ export function createWorkerBackend(): MailBackend {
       return withImap(account, async (client) => {
         const c = internals(client);
         const name = quoteMailbox(c.encodeMailboxName(path));
+        await mailboxCommand(client, `DELETE ${name}`);
+        // Unsubscribe only after a successful DELETE: a rejected deletion must
+        // not leave an existing folder hidden from subscribed-only clients.
         try {
           await mailboxCommand(client, `UNSUBSCRIBE ${name}`);
         } catch {
           // best-effort
         }
-        await mailboxCommand(client, `DELETE ${name}`);
         return { path };
       });
     },

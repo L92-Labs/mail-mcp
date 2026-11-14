@@ -345,6 +345,47 @@ describe("folder management", () => {
     });
   });
 
+  it("folder_create refuses separator aliasing", async () => {
+    const b = fakeBackend();
+    await expect(dispatchTool("folder_create", { path: "Sent/" }, makeCtx(b))).rejects.toThrow(/must not end with/);
+    await expect(dispatchTool("folder_create", { path: "A//B" }, makeCtx(b))).rejects.toThrow(/doubled/);
+    expect(b.createFolder).not.toHaveBeenCalled();
+  });
+
+  it("folder_create refuses surrounding whitespace (exact mailbox names)", async () => {
+    const b = fakeBackend();
+    await expect(dispatchTool("folder_create", { path: " Receipts " }, makeCtx(b))).rejects.toThrow(/whitespace/);
+    expect(b.createFolder).not.toHaveBeenCalled();
+  });
+
+  it("folder_create resets a stale event cursor when the folder is created", async () => {
+    const b = fakeBackend();
+    const ctx = makeCtx(b);
+    const deleted: string[] = [];
+    ctx.cursors = {
+      get: async () => null,
+      set: async () => {},
+      delete: async (key: string) => {
+        deleted.push(key);
+      },
+    };
+    await dispatchTool("folder_create", { path: "Receipts" }, ctx);
+    expect(deleted).toEqual(["events:uid:default:Receipts"]);
+
+    const dup = fakeBackend({ createFolder: vi.fn(async () => ({ path: "Receipts", created: false })) });
+    const ctx2 = makeCtx(dup);
+    const deleted2: string[] = [];
+    ctx2.cursors = {
+      get: async () => null,
+      set: async () => {},
+      delete: async (key: string) => {
+        deleted2.push(key);
+      },
+    };
+    await dispatchTool("folder_create", { path: "Receipts" }, ctx2);
+    expect(deleted2).toEqual([]);
+  });
+
   it("folder mutations invalidate the folders_list cache", async () => {
     const b = fakeBackend();
     const ctx = makeCtx(b, { cacheTtlSeconds: 120 }, account, true);
@@ -372,7 +413,7 @@ describe("folder management", () => {
     await dispatchTool("folder_rename", { path: "Receipts", new_path: "receipts" }, makeCtx(b));
     expect(b.renameFolder).toHaveBeenCalledWith(account, "Receipts", "receipts");
     await expect(
-      dispatchTool("folder_rename", { path: "Receipts", new_path: " Receipts " }, makeCtx(b)),
+      dispatchTool("folder_rename", { path: "Receipts", new_path: "Receipts" }, makeCtx(b)),
     ).rejects.toThrow(/must differ/);
     expect(b.renameFolder).toHaveBeenCalledTimes(1);
   });

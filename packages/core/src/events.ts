@@ -72,5 +72,8 @@ export function memoryCursorStore(): CursorStore {
     async set(key, value) {
       map.set(key, value);
     },
+    async delete(key) {
+      map.delete(key);
+    },
   };
 }

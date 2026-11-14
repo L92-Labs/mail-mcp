@@ -418,9 +418,16 @@ export function createNodeBackend(): MailBackend {
         try {
           res = await client.mailboxCreate(path);
         } catch (error) {
-          // imapflow throws NO on duplicates (contrary to its docs); normalize to created:false.
           if (isAlreadyExists(error)) return { path, created: false };
-          throw error;
+          // imapflow's CREATE handler also SUBSCRIBEs internally: a successful
+          // create followed by a refused subscribe throws although the folder
+          // exists. Probe before reporting failure so the result stays truthful.
+          try {
+            await client.mailboxOpen(path);
+            return { path, created: true };
+          } catch {
+            throw error;
+          }
         }
         // imapflow subscribes on create; keep the result shape backend-agnostic.
         return { path: res?.path ?? path, created: res?.created !== false };

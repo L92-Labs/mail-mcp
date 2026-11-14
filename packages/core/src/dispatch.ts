@@ -20,13 +20,14 @@ import {
   type ReplyInput,
   type SpecialFolder,
 } from "./compose.js";
-import { pollNewMessages } from "./events.js";
+import { pollNewMessages, eventCursorKey } from "./events.js";
 import {
   assertFolderManageable,
   assertNotInbox,
   findProtectedFolder,
   isInboxPath,
   normalizeFolderPath,
+  rejectSeparatorTricks,
   type ProtectedFolder,
 } from "./folders.js";
 import {
@@ -188,7 +189,17 @@ async function cacheGeneration(ctx: DispatchContext, account: EmailAccount): Pro
 /** Invalidate cached listings for an account after a mutation. */
 async function bumpCache(ctx: DispatchContext, account: EmailAccount): Promise<void> {
   if (!ctx.cache || ctx.config.cacheTtlSeconds <= 0) return;
-  await ctx.cache.set(`gen|${account.name}`, String(Date.now()), 86_400);
+  // Random per bump: Date.now() collides for same-millisecond mutations and can
+  // move backwards under Workers clock skew, reviving a stale key.
+  const generation =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await ctx.cache.set(`gen|${account.name}`, generation, 86_400);
+  } catch {
+    // Best-effort: a failed cache write must never mask a successful mutation.
+  }
 }
 
 async function listFolders(ctx: DispatchContext, account: EmailAccount): Promise<FolderInfo[]> {
@@ -363,12 +374,24 @@ export async function dispatchTool(
         throw new Error('INBOX already exists; create a subfolder instead, e.g. "INBOX/…"');
       }
       const folders = await listFolders(ctx, account);
+      // Same aliasing refusal as rename/delete: a server-dependent trailing
+      // separator could create a path this tool could never manage again.
+      rejectSeparatorTricks(path, folders);
       const special = findProtectedFolder(path, folders, protectedFolders(account, folders));
       if (special) {
         throw new Error(`"${special.path}" already exists as the ${special.use} special folder`);
       }
       const result = await ctx.backend.createFolder(account, path);
       await bumpCache(ctx, account);
+      if (result.created) {
+        // A recreated folder may reuse a path whose old poll cursor exceeds its
+        // new UIDs; drop it so the next poll re-seeds at the current watermark.
+        try {
+          await ctx.cursors.delete?.(eventCursorKey(account.name, result.path));
+        } catch {
+          // best-effort
+        }
+      }
       return {
         created: result.created,
         folder: result.path,
