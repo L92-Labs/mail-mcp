@@ -441,6 +441,15 @@ export function createNodeBackend(): MailBackend {
     async renameFolder(account, path, newPath) {
       return withImap(account, async (client) => {
         const res = await client.mailboxRename(path, newPath);
+        // imapflow's RENAME does not touch subscriptions, and servers only
+        // SHOULD move them (RFC 3501): subscribe the new path before dropping
+        // the old one — worst case is a stale duplicate subscription.
+        try {
+          const subscribed = await client.mailboxSubscribe(newPath);
+          if (subscribed !== false) await client.mailboxUnsubscribe(path);
+        } catch {
+          // best-effort
+        }
         return { path: res?.path ?? path, newPath: res?.newPath ?? newPath };
       });
     },

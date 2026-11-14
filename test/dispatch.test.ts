@@ -404,6 +404,10 @@ describe("folder management", () => {
   it("folder_rename migrates the event cursor to the new path", async () => {
     const b = fakeBackend({
       renameFolder: vi.fn(async () => ({ path: "Receipts", newPath: "Finance/Receipts" })),
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "Receipts", path: "Finance/Receipts", delimiter: "/" },
+      ]),
     });
     const ctx = makeCtx(b);
     const sets = new Map<string, string>();
@@ -420,6 +424,70 @@ describe("folder management", () => {
     await dispatchTool("folder_rename", { path: "Receipts", new_path: "Finance/Receipts" }, ctx);
     expect(sets.get("events:uid:default:Finance/Receipts")).toBe("100");
     expect(deleted).toEqual(["events:uid:default:Receipts"]);
+  });
+
+  it("folder_rename migrates descendant cursors and drops stale destination cursors", async () => {
+    // Post-rename listing: the folder and its child now live under Finance/.
+    const b = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "Work", path: "Archive/Work", delimiter: "/" },
+        { name: "Foo", path: "Archive/Work/Foo", delimiter: "/" },
+        { name: "Workbench", path: "Workbench", delimiter: "/" },
+      ]),
+    });
+    const ctx = makeCtx(b);
+    const sets = new Map<string, string>();
+    const deleted: string[] = [];
+    const cursors = new Map([
+      ["events:uid:default:Work", "50"],
+      ["events:uid:default:Work/Foo", "12"],
+      // Stale residue at the destination from outside the tool's lifecycle:
+      ["events:uid:default:Archive/Work/Foo", "999"],
+    ]);
+    ctx.cursors = {
+      get: async (key: string) => cursors.get(key) ?? null,
+      set: async (key: string, value: string) => {
+        sets.set(key, value);
+        cursors.set(key, value);
+      },
+      delete: async (key: string) => {
+        deleted.push(key);
+        cursors.delete(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work" }, ctx);
+    // Parent + descendant migrated; the lookalike "Workbench" is untouched.
+    expect(sets.get("events:uid:default:Archive/Work")).toBe("50");
+    expect(sets.get("events:uid:default:Archive/Work/Foo")).toBe("12");
+    expect(deleted).toEqual(
+      expect.arrayContaining(["events:uid:default:Work", "events:uid:default:Work/Foo"]),
+    );
+    expect(deleted).not.toContain("events:uid:default:Workbench");
+    // Source had a cursor, so the destination key was overwritten, not deleted.
+    expect(deleted).not.toContain("events:uid:default:Archive/Work");
+    expect(cursors.get("events:uid:default:Archive/Work/Foo")).toBe("12");
+
+    // No cursor at the source: the stale destination cursor is stale by definition.
+    const b2 = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "Work", path: "Archive/Work", delimiter: "/" },
+      ]),
+    });
+    const ctx2 = makeCtx(b2);
+    const deleted2: string[] = [];
+    ctx2.cursors = {
+      get: async () => null,
+      set: async () => {},
+      delete: async (key: string) => {
+        deleted2.push(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work" }, ctx2);
+    expect(deleted2).toContain("events:uid:default:Archive/Work");
   });
 
   it("folder mutations invalidate the folders_list cache", async () => {
