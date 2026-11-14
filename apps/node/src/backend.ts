@@ -261,6 +261,9 @@ export function createNodeBackend(): MailBackend {
           },
           { uid: true },
         )) {
+          // Skip messages the server fetched without a usable UID (races
+          // with expunges) — they would surface as malformed ids.
+          if (!Number.isFinite(msg.uid)) continue;
           emails.push(await summarize(account, folder, msg, Boolean(input.includeContent)));
         }
         emails.sort((a, b) => b.uid - a.uid);
@@ -400,6 +403,9 @@ export function createNodeBackend(): MailBackend {
           },
           { uid: true },
         )) {
+          // Skip messages fetched without a usable UID (expunge races) —
+          // they would poison the poll cursor with NaN.
+          if (!Number.isFinite(msg.uid)) continue;
           messages.push(await summarize(account, folder, msg, false));
         }
         messages.sort((a, b) => a.uid - b.uid);

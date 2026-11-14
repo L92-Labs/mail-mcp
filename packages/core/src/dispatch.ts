@@ -251,21 +251,16 @@ async function specialFolder(
   return resolveSpecialFolder(await listFolders(ctx, account), kind);
 }
 
-async function resolveMoveTarget(
-  ctx: DispatchContext,
-  account: EmailAccount,
-  value: string,
-): Promise<string> {
+function resolveMoveTarget(folders: FolderInfo[], value: string): string {
   if (value.trim().toLowerCase() === "inbox") return "INBOX";
   const alias = parseFolderAlias(value);
   if (!alias) return value;
-  const folders = await listFolders(ctx, account);
   // A literal folder with this exact path wins over the alias.
   if (folders.some((f) => f.path === value)) return value;
   const path = resolveSpecialFolder(folders, alias);
   if (!path) {
     throw new Error(
-      `no "${alias}" folder found for account "${account.name}"; pass an exact path from folders_list`,
+      `no "${alias}" folder found; pass an exact path from folders_list`,
     );
   }
   return path;
@@ -447,30 +442,35 @@ export async function dispatchTool(
       // UIDs: migrate poll cursors for exactly the folders that moved, so
       // unrelated destinations keep their own cursors.
       try {
+        // An unrelated literal folder at a raw spelling owns its own cursor:
+        // never clobber or delete it (literal-wins, like resolveMoveTarget).
+        // Full-path match only: a folder whose LEAF name equals the path is
+        // not a literal folder (namespace-alias fixtures use leaf names) —
+        // matching on name would exclude the raw-alias cursor keys.
+        const literalAt = (p: string): boolean =>
+          folders.some((f) => f.path === p);
         for (const f of sourceFolders) {
           const suffix = f.path.slice(sourceRoot.length);
-          // The poller keys cursors by whatever folder string the caller
-          // passed to emails_events — the canonical listing path, the raw
-          // (unprefixed) argument, and after the rename the destination's
-          // canonical or raw spelling. Seed/clean every plausible spelling;
-          // the highest watermark wins.
           const newKeys = [
             ...new Set([
               eventCursorKey(account.name, result.newPath + suffix),
-              eventCursorKey(account.name, newPath + suffix),
+              ...(literalAt(newPath + suffix) ? [] : [eventCursorKey(account.name, newPath + suffix)]),
             ]),
           ];
           const oldKeys = [
             ...new Set([
               eventCursorKey(account.name, f.path),
-              eventCursorKey(account.name, parsed.path + suffix),
+              ...(literalAt(parsed.path + suffix) ? [] : [eventCursorKey(account.name, parsed.path + suffix)]),
             ]),
           ];
-          const storedValues = (
+              const storedValues = (
             await Promise.all(oldKeys.map(async (k) => ctx.cursors.get(k)))
-          ).filter((v): v is string => v !== null);
+          )
+            .filter((v): v is string => v !== null)
+            .map((v) => Number(v))
+            .filter(Number.isFinite);
           if (storedValues.length) {
-            const watermark = String(Math.max(...storedValues.map((v) => Number(v))));
+            const watermark = String(Math.max(...storedValues));
             for (const k of newKeys) await ctx.cursors.set(k, watermark);
             for (const k of oldKeys) await ctx.cursors.delete?.(k);
           } else {
@@ -601,13 +601,42 @@ export async function dispatchTool(
     case "emails_modify": {
       const parsed = modifyEmailsSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
-      for (const id of parsed.email_ids) parseEmailId(id);
-      const moveTo = parsed.move_to_folder?.trim()
-        ? await resolveMoveTarget(ctx, account, parsed.move_to_folder)
-        : undefined;
+      // Per-id validation: one malformed id skips itself instead of failing
+      // the whole batch (production: ids like "INBOX:undefined" from a
+      // server that dropped a message between search and fetch).
+      const parsedIds: Array<{ folder: string; uid: number; id: string }> = [];
+      const skipped: Array<{ id: string; error: string }> = [];
+      for (const id of parsed.email_ids) {
+        try {
+          const parsedId = parseEmailId(id);
+          parsedIds.push({ ...parsedId, id });
+        } catch (err) {
+          skipped.push({ id, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      // Report the fundamental problem first: every id malformed.
+      if (parsedIds.length === 0 && skipped.length > 0) {
+        throw new Error(
+          `all ${skipped.length} email ids were malformed (first: "${skipped[0].id}" — ${skipped[0].error})`,
+        );
+      }
+      // Move targets must exist: servers differ on MOVE/COPY to a missing
+      // mailbox (silent no-op vs auto-create) — refuse deterministically.
+      // Flag-only batches (no move) skip the listing roundtrip entirely.
+      const moveArg = parsed.move_to_folder;
+      const folders = moveArg?.trim() ? await ctx.backend.listFolders(account) : undefined;
+      const moveTo = folders && moveArg ? resolveMoveTarget(folders, moveArg) : undefined;
+      // INBOX always exists (RFC 3501, case-insensitive token) — exempt
+      // from the listing-spelling existence check.
+      if (moveTo && folders && moveTo !== "INBOX" && !folders.some((f) => f.path === moveTo)) {
+        throw new Error(
+          `move target "${moveTo}" does not exist on the server; use folders_list for the available paths`,
+        );
+      }
+      const validIds = parsedIds.map((p) => p.id);
       const result = await ctx.backend.modifyEmails(account, {
         folder: parsed.folder,
-        emailIds: parsed.email_ids,
+        emailIds: validIds,
         markRead: parsed.mark_read,
         markUnread: parsed.mark_unread,
         flag: parsed.flag,
@@ -615,7 +644,7 @@ export async function dispatchTool(
         moveToFolder: moveTo,
       });
       await bumpCache(ctx, account);
-      return { ...result, moved_to: moveTo ?? null };
+      return { ...result, moved_to: moveTo ?? null, skipped };
     }
 
     case "emails_events": {

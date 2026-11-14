@@ -170,6 +170,16 @@ describe("flat namespaces (NIL delimiter)", () => {
     expect(() => assertFolderManageable("INBOX.Sent", flat, "delete")).toThrow(/\\Sent folder/);
   });
 
+  it("unprefixed leaf names do not suffix-match protected paths on flat namespaces", () => {
+    // Regression pin (round 6.5r fix): pre-fix, "Sent" suffix-matched the
+    // protected INBOX.Sent under the ['.','/'] fallback and was refused.
+    // Post-fix: an independent flat-namespace mailbox named "Sent" renames
+    // and deletes freely, and the create guard does not flag it.
+    expect(assertFolderManageable("Sent", flat, "delete")).toBe("Sent");
+    expect(assertFolderManageable("Sent", flat, "rename")).toBe("Sent");
+    expect(findProtectedFolder("Sent", flat)).toBeNull();
+  });
+
   it("allows literal dots and slashes in flat-namespace names", () => {
     // Codex P2 (round 6.5t2 era): on flat namespaces dots/slashes are
     // literal characters — ordinary names like Receipts. or Reports..2026
