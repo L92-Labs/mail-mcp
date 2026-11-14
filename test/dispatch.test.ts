@@ -393,7 +393,7 @@ describe("folder management", () => {
       renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
       listFolders: vi.fn(async () => [
         { name: "INBOX", path: "INBOX", delimiter: "/" },
-        { name: "Work", path: "Archive/Work", delimiter: "/" },
+        { name: "Work", path: "Work", delimiter: "/" },
         { name: "Work.2024", path: "Archive/Work.2024", delimiter: "/" },
       ]),
     });
@@ -425,13 +425,13 @@ describe("folder management", () => {
     expect(cursors.get("events:uid:default:Archive/Work.2024")).toBe("9");
 
     // Unknown delimiter (server reports none): both separators are candidates,
-    // so the dot-suffixed name IS treated as a descendant — fail-closed.
+    // so the dot-suffixed name IS treated as a source descendant — fail-closed.
     const b2 = fakeBackend({
       renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
       listFolders: vi.fn(async () => [
         { name: "INBOX", path: "INBOX" },
-        { name: "Work", path: "Archive/Work" },
-        { name: "Work.2024", path: "Archive/Work.2024" },
+        { name: "Work", path: "Work" },
+        { name: "Work.2024", path: "Work.2024" },
       ]),
     });
     const ctx2 = makeCtx(b2);
@@ -447,35 +447,6 @@ describe("folder management", () => {
     expect(sets2.get("events:uid:default:Archive/Work.2024")).toBe("7");
   });
 
-  it("folder_rename never migrates case-variant lookalike cursors", async () => {
-    // Case-variant descendants are unrelated mailboxes (servers may be
-    // case-sensitive): their cursors must not be migrated or dropped.
-    const b2 = fakeBackend({
-      renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
-      listFolders: vi.fn(async () => [
-        { name: "INBOX", path: "INBOX", delimiter: "/" },
-        { name: "Work", path: "Archive/Work", delimiter: "/" },
-        { name: "Notes", path: "new/Notes", delimiter: "/" },
-      ]),
-    });
-    const ctx2 = makeCtx(b2);
-    const sets2 = new Map<string, string>();
-    const deleted2: string[] = [];
-    ctx2.cursors = {
-      get: async (key: string) => (key === "events:uid:default:new/Notes" ? "7" : null),
-      set: async (key: string, value: string) => {
-        sets2.set(key, value);
-      },
-      delete: async (key: string) => {
-        deleted2.push(key);
-      },
-    };
-    await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work" }, ctx2);
-    expect(sets2.get("events:uid:default:Archive/Work")).toBeUndefined();
-    expect(deleted2).not.toContain("events:uid:default:new/Notes");
-    expect(sets2.get("events:uid:default:new/Notes")).toBeUndefined();
-  });
-
   it("folder_rename never corrupts case-variant lookalike cursors", async () => {
     // Renaming Old -> New where an unrelated lowercase "new/Notes" exists
     // (case-sensitive server): the case-variant folder keeps its live cursor
@@ -485,9 +456,9 @@ describe("folder management", () => {
       renameFolder: vi.fn(async () => ({ path: "Old", newPath: "New" })),
       listFolders: vi.fn(async () => [
         { name: "INBOX", path: "INBOX", delimiter: "/" },
-        { name: "New", path: "New", delimiter: "/" },
+        { name: "Old", path: "Old", delimiter: "/" },
         { name: "Notes", path: "new/Notes", delimiter: "/" },
-        { name: "2024", path: "New/2024", delimiter: "/" },
+        { name: "2024", path: "Old/2024", delimiter: "/" },
       ]),
     });
     const ctx2 = makeCtx(b2);
@@ -540,7 +511,7 @@ describe("folder management", () => {
       renameFolder: vi.fn(async () => ({ path: "Receipts", newPath: "Finance/Receipts" })),
       listFolders: vi.fn(async () => [
         { name: "INBOX", path: "INBOX", delimiter: "/" },
-        { name: "Receipts", path: "Finance/Receipts", delimiter: "/" },
+        { name: "Receipts", path: "Receipts", delimiter: "/" },
       ]),
     });
     const ctx = makeCtx(b);
@@ -561,13 +532,14 @@ describe("folder management", () => {
   });
 
   it("folder_rename migrates descendant cursors and drops stale destination cursors", async () => {
-    // Post-rename listing: the folder and its child now live under Finance/.
+    // Pre-rename listing: the source tree; the destination path carries a
+    // residual cursor from outside the tool's lifecycle.
     const b = fakeBackend({
       renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
       listFolders: vi.fn(async () => [
         { name: "INBOX", path: "INBOX", delimiter: "/" },
-        { name: "Work", path: "Archive/Work", delimiter: "/" },
-        { name: "Foo", path: "Archive/Work/Foo", delimiter: "/" },
+        { name: "Work", path: "Work", delimiter: "/" },
+        { name: "Foo", path: "Work/Foo", delimiter: "/" },
         { name: "Workbench", path: "Workbench", delimiter: "/" },
       ]),
     });
@@ -603,12 +575,13 @@ describe("folder management", () => {
     expect(deleted).not.toContain("events:uid:default:Archive/Work");
     expect(cursors.get("events:uid:default:Archive/Work/Foo")).toBe("12");
 
-    // No cursor at the source: the stale destination cursor is stale by definition.
+    // No cursor at the source: the mapped destination's stale cursor is stale
+    // by definition.
     const b2 = fakeBackend({
       renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
       listFolders: vi.fn(async () => [
         { name: "INBOX", path: "INBOX", delimiter: "/" },
-        { name: "Work", path: "Archive/Work", delimiter: "/" },
+        { name: "Work", path: "Work", delimiter: "/" },
       ]),
     });
     const ctx2 = makeCtx(b2);

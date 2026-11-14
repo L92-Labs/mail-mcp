@@ -1,20 +1,26 @@
 /**
- * Extract the mailbox name from an untagged LSUB line. Pure and I/O-free so
- * it can be unit-tested outside the Workers runtime. Best-effort:
- * - literal bodies (raw bytes, incl. empty `{0}`) return null — those names
- *   stay unmigrated;
- * - unquoted atom names return null (guards against the delimiter being
- *   mistaken for the name);
- * - quoted names are returned with `\"` / `\\` unescaped.
+ * Extract the mailbox name from an untagged LSUB line
+ * (`* LSUB (<flags>) <delimiter> <mailbox>`). Pure and I/O-free so it can be
+ * unit-tested outside the Workers runtime.
+ *
+ * - Literal bodies: the raw bytes ARE the mailbox name (no quoting), decoded
+ *   as text here and mUTF-7-decoded by the caller.
+ * - Quoted mailbox: `\"` / `\\` unescaped.
+ * - Unquoted atom mailbox (may contain the delimiter, e.g. `Old/Child` on
+ *   multi-delimiter setups): returned as-is.
+ * Returns null when the line is not LSUB or carries no usable name.
  */
-export function parseLsubName(line: string, literal: unknown): string | null {
-  if (literal != null) return null;
-  if (!line.startsWith("* LSUB")) return null;
-  const quoted = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)];
-  const last = quoted.at(-1);
-  if (!last) return null;
-  // The mailbox name must terminate the line; an unquoted atom after the
-  // last quoted token means the name was an astring we did not parse.
-  if (line.slice((last.index ?? 0) + last[0].length).trim() !== "") return null;
-  return last[1].replace(/\\(["\\])/g, "$1");
+export function parseLsubName(line: string, literal: Uint8Array | null | undefined): string | null {
+  if (literal != null) {
+    const decoded = new TextDecoder().decode(literal).trim();
+    return decoded || null;
+  }
+  const m = /^\* LSUB \([^)]*\) (?:"((?:[^"\\]|\\.)*)"|NIL|\S+) (.+)$/.exec(line);
+  if (!m) return null;
+  const mailbox = m[2].trim();
+  if (!mailbox) return null;
+  if (mailbox.startsWith('"') && mailbox.endsWith('"') && mailbox.length >= 2) {
+    return mailbox.slice(1, -1).replace(/\\(["\\])/g, "$1") || null;
+  }
+  return mailbox;
 }

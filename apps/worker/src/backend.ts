@@ -256,8 +256,7 @@ async function subscribedPaths(client: CFImap): Promise<Set<string>> {
     for (const item of items ?? []) {
       const name = parseLsubName(item.line, item.literal);
       if (name) out.add(c.decodeMailboxName(name));
-    }
-  });
+    }  });
   return out;
 }
 

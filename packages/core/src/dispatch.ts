@@ -403,8 +403,12 @@ export async function dispatchTool(
       const parsed = folderRenameSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
       assertNotInbox(parsed.path, "rename");
+      // Pre-rename snapshot: guards AND the set of folders the rename moves.
       const folders = await listFolders(ctx, account);
       const path = assertFolderManageable(parsed.path, folders, "rename", protectedFolders(account, folders));
+      const sourceFolders = folders.filter(
+        (f) => f.path === path || isDescendantFolder(f.path, path, folders),
+      );
       const newPath = normalizeFolderPath(parsed.new_path);
       if (newPath === path) {
         throw new Error("new_path must differ from path");
@@ -413,23 +417,21 @@ export async function dispatchTool(
       assertFolderManageable(newPath, folders, "rename", protectedFolders(account, folders));
       const result = await ctx.backend.renameFolder(account, path, newPath);
       await bumpCache(ctx, account);
-      // RENAME moves the mailbox — and its children — with their UIDs: migrate
-      // poll cursors for the renamed folder and every descendant so the events
-      // stream continues seamlessly on the new paths.
+      // RENAME moves the mailbox — and its captured children — with their
+      // UIDs: migrate poll cursors for exactly the folders that moved, so
+      // unrelated destinations keep their own cursors.
       try {
-        const folders = await listFolders(ctx, account);
-        for (const f of folders) {
-          if (f.path !== result.newPath && !isDescendantFolder(f.path, result.newPath, folders)) continue;
-          const suffix = f.path.slice(result.newPath.length);
-          const oldKey = eventCursorKey(account.name, result.path + suffix);
+        for (const f of sourceFolders) {
+          const suffix = f.path.slice(path.length);
+          const oldKey = eventCursorKey(account.name, f.path);
+          const newKey = eventCursorKey(account.name, newPath + suffix);
           const stored = await ctx.cursors.get(oldKey);
-          const newKey = eventCursorKey(account.name, f.path);
           if (stored !== null) {
             await ctx.cursors.set(newKey, stored);
             await ctx.cursors.delete?.(oldKey);
           } else {
-            // The renamed mailbox's history is the source's: any pre-existing
-            // cursor at a destination path is stale by definition.
+            // The moved folder's history is the source's: a residual cursor
+            // at its destination path is stale by definition.
             await ctx.cursors.delete?.(newKey);
           }
         }
