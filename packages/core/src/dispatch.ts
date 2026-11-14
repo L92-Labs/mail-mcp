@@ -423,8 +423,11 @@ export async function dispatchTool(
       try {
         for (const f of sourceFolders) {
           const suffix = f.path.slice(path.length);
-          const oldKey = eventCursorKey(account.name, f.path);
-          const newKey = eventCursorKey(account.name, newPath + suffix);
+          // Key bases come from the backend-canonical paths (servers with
+          // namespace prefixes normalize RENAME args), not the caller's raw
+          // input — the poller keys cursors by those canonical paths.
+          const oldKey = eventCursorKey(account.name, result.path + suffix);
+          const newKey = eventCursorKey(account.name, result.newPath + suffix);
           const stored = await ctx.cursors.get(oldKey);
           if (stored !== null) {
             await ctx.cursors.set(newKey, stored);

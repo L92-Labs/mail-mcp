@@ -11,6 +11,7 @@
  * Returns null when the line is not LSUB or carries no usable name.
  */
 export function parseLsubName(line: string, literal: Uint8Array | null | undefined): string | null {
+  if (!line.startsWith("* LSUB")) return null;
   if (literal != null) {
     const decoded = new TextDecoder().decode(literal).trim();
     return decoded || null;

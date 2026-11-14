@@ -447,6 +447,48 @@ describe("folder management", () => {
     expect(sets2.get("events:uid:default:Archive/Work.2024")).toBe("7");
   });
 
+  it("folder_rename derives cursor keys from backend-canonical paths (namespace prefixes)", async () => {
+    // Courier-style "INBOX." prefix: the caller's invented destination gets
+    // namespace-normalized by the server/backend, so cursor keys must come
+    // from the canonical paths the backend returns, not the raw input.
+    const b = fakeBackend({
+      renameFolder: vi.fn(async () => ({
+        path: "INBOX.Work",
+        newPath: "INBOX.Archive/Work",
+      })),
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "Work", path: "INBOX.Work", delimiter: "/" },
+        { name: "Foo", path: "INBOX.Work/Foo", delimiter: "/" },
+      ]),
+    });
+    const ctx = makeCtx(b);
+    const sets = new Map<string, string>();
+    const deleted: string[] = [];
+    const cursors = new Map([
+      ["events:uid:default:INBOX.Work", "50"],
+      ["events:uid:default:INBOX.Work/Foo", "12"],
+    ]);
+    ctx.cursors = {
+      get: async (key: string) => cursors.get(key) ?? null,
+      set: async (key: string, value: string) => {
+        sets.set(key, value);
+        cursors.set(key, value);
+      },
+      delete: async (key: string) => {
+        deleted.push(key);
+        cursors.delete(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "INBOX.Work", new_path: "Archive/Work" }, ctx);
+    expect(sets.get("events:uid:default:INBOX.Archive/Work")).toBe("50");
+    expect(sets.get("events:uid:default:INBOX.Archive/Work/Foo")).toBe("12");
+    expect(deleted).toEqual(
+      expect.arrayContaining(["events:uid:default:INBOX.Work", "events:uid:default:INBOX.Work/Foo"]),
+    );
+    expect(cursors.get("events:uid:default:INBOX.Archive/Work/Foo")).toBe("12");
+  });
+
   it("folder_rename never corrupts case-variant lookalike cursors", async () => {
     // Renaming Old -> New where an unrelated lowercase "new/Notes" exists
     // (case-sensitive server): the case-variant folder keeps its live cursor
