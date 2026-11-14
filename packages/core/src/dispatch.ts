@@ -406,7 +406,7 @@ export async function dispatchTool(
         try {
           for (const key of new Set([
             eventCursorKey(account.name, result.path),
-            eventCursorKey(account.name, path),
+            eventCursorKey(account.name, parsed.path),
           ])) {
             await ctx.cursors.delete?.(key);
           }
@@ -449,15 +449,24 @@ export async function dispatchTool(
       try {
         for (const f of sourceFolders) {
           const suffix = f.path.slice(sourceRoot.length);
-          // Key bases come from the backend-canonical paths (servers with
-          // namespace prefixes normalize RENAME args), not the caller's raw
-          // input — the poller keys cursors by those canonical paths.
-          const oldKey = eventCursorKey(account.name, result.path + suffix);
           const newKey = eventCursorKey(account.name, result.newPath + suffix);
-          const stored = await ctx.cursors.get(oldKey);
-          if (stored !== null) {
-            await ctx.cursors.set(newKey, stored);
-            await ctx.cursors.delete?.(oldKey);
+          // The poller keys cursors by whatever folder string the caller
+          // passed to emails_events — the canonical listing path, or the
+          // raw (unprefixed) argument. Migrate every plausible spelling;
+          // the highest watermark wins.
+          const oldKeys = [
+            ...new Set([
+              eventCursorKey(account.name, f.path),
+              eventCursorKey(account.name, parsed.path + suffix),
+            ]),
+          ];
+          const storedValues = (
+            await Promise.all(oldKeys.map(async (k) => ctx.cursors.get(k)))
+          ).filter((v): v is string => v !== null);
+          if (storedValues.length) {
+            const watermark = String(Math.max(...storedValues.map((v) => Number(v))));
+            await ctx.cursors.set(newKey, watermark);
+            for (const k of oldKeys) await ctx.cursors.delete?.(k);
           } else {
             // The moved folder's history is the source's: a residual cursor
             // at its destination path is stale by definition.
@@ -491,7 +500,7 @@ export async function dispatchTool(
       try {
         for (const key of new Set([
           eventCursorKey(account.name, result.path),
-          eventCursorKey(account.name, path),
+          eventCursorKey(account.name, parsed.path),
         ])) {
           await ctx.cursors.delete?.(key);
         }
