@@ -897,6 +897,79 @@ describe("folder management", () => {
     expect(b.createFolder).not.toHaveBeenCalled();
   });
 
+  it("emails_modify skips malformed ids instead of failing the batch", async () => {
+    const b = fakeBackend();
+    const r = (await dispatchTool(
+      "emails_modify",
+      { email_ids: ["INBOX:7", "INBOX:undefined", "garbage"], mark_read: true },
+      makeCtx(b),
+    )) as { updated: number; skipped: Array<{ id: string }> };
+    expect(r.updated).toBe(1);
+    expect(r.skipped.map((s) => s.id)).toEqual(["INBOX:undefined", "garbage"]);
+    expect(b.modifyEmails).toHaveBeenCalledWith(
+      account,
+      expect.objectContaining({ emailIds: ["INBOX:7"] }),
+    );
+    // All-malformed batch: explicit error (never a silent success-shaped no-op).
+    await expect(
+      dispatchTool("emails_modify", { email_ids: ["INBOX:undefined"], mark_read: true }, makeCtx(b)),
+    ).rejects.toThrow(/all 1 email ids were malformed/);
+    expect(b.modifyEmails).toHaveBeenCalledTimes(1);
+  });
+
+  it("emails_modify refuses moves to non-existent folders (no phantom moves)", async () => {
+    const b = fakeBackend();
+    // Raw path that is not in the listing and not an alias: refused before
+    // any backend call — servers differ on MOVE/COPY to a missing mailbox.
+    await expect(
+      dispatchTool(
+        "emails_modify",
+        { email_ids: ["INBOX:7"], move_to_folder: "Reciets" },
+        makeCtx(b),
+      ),
+    ).rejects.toThrow(/does not exist on the server/);
+    expect(b.modifyEmails).not.toHaveBeenCalled();
+    // Existing folder moves still work.
+    await dispatchTool("emails_modify", { email_ids: ["INBOX:7"], move_to_folder: "Sent" }, makeCtx(b));
+    expect(b.modifyEmails).toHaveBeenCalledWith(
+      account,
+      expect.objectContaining({ moveToFolder: "Sent" }),
+    );
+    // INBOX destination: always exists regardless of the listing's spelling.
+    await dispatchTool("emails_modify", { email_ids: ["INBOX:7"], move_to_folder: "Inbox" }, makeCtx(b));
+    expect(b.modifyEmails).toHaveBeenLastCalledWith(
+      account,
+      expect.objectContaining({ moveToFolder: "INBOX" }),
+    );
+  });
+
+  it("emails_modify preserves exact whitespace destinations and only trims for aliases", async () => {
+    const b = fakeBackend({
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "Receipts ", path: "Receipts ", delimiter: "/" },
+        { name: "Receipts", path: "Receipts", delimiter: "/" },
+        { name: "Trash", path: "Trash", delimiter: "/", specialUse: "\\Trash" },
+      ]),
+    });
+    // Exact listed path (with trailing space) wins verbatim.
+    await dispatchTool(
+      "emails_modify",
+      { email_ids: ["INBOX:7"], move_to_folder: "Receipts " },
+      makeCtx(b),
+    );
+    expect(b.modifyEmails).toHaveBeenLastCalledWith(
+      account,
+      expect.objectContaining({ moveToFolder: "Receipts " }),
+    );
+    // Alias handling still works on trimmed values.
+    await dispatchTool("emails_modify", { email_ids: ["INBOX:7"], move_to_folder: "  TRASH  " }, makeCtx(b));
+    expect(b.modifyEmails).toHaveBeenLastCalledWith(
+      account,
+      expect.objectContaining({ moveToFolder: "Trash" }),
+    );
+  });
+
   it("folder_delete requires confirm", async () => {
     const b = fakeBackend();
     // Schema: confirm is a required boolean.

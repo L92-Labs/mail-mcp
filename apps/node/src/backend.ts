@@ -261,6 +261,9 @@ export function createNodeBackend(): MailBackend {
           },
           { uid: true },
         )) {
+          // Skip messages the server fetched without a usable UID (races
+          // with expunges) — they would surface as malformed ids.
+          if (!Number.isFinite(msg.uid)) continue;
           emails.push(await summarize(account, folder, msg, Boolean(input.includeContent)));
         }
         emails.sort((a, b) => b.uid - a.uid);

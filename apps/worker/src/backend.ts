@@ -293,7 +293,9 @@ export function createWorkerBackend(): MailBackend {
         const uids = await client.searchEmails(buildSearch(input));
         const page = pageUids(uids, limit, input.cursor);
         // Bodies are needed for snippets; cf-imap has no partial fetch.
+        // Skip messages fetched without a usable UID (races with expunges).
         const emails = (await fetchUids(client, folder, page.selected, true))
+          .filter((e) => Number.isFinite(e.uid))
           .map((e) => summarize(account, folder, e, Boolean(input.includeContent), true))
           .sort((a, b) => b.uid - a.uid);
         return { emails, total: page.total, nextCursor: page.nextCursor };
