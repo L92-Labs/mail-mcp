@@ -1,4 +1,5 @@
 import { CFImap, type Email as CfEmail, type SearchEmailsProps, type ResponseItem } from "cf-imap";
+import { parseLsubName } from "./lsub.js";
 import { Email as MimeEmail, WorkerMailer } from "worker-mailer";
 import {
   isDescendantFolder,
@@ -253,16 +254,8 @@ async function subscribedPaths(client: CFImap): Promise<Set<string>> {
     await c.send(tag, `LSUB "" "*"`);
     const { items } = await c.stream.readUntilTag(tag);
     for (const item of items ?? []) {
-      const line = item.line ?? "";
-      if (!line.startsWith("* LSUB")) continue;
-      if (item.literal != null) continue; // literal names stay unmigrated (best-effort)
-      const quoted = [...line.matchAll(/"((?:[^"\\]|\\.)*)"/g)];
-      const last = quoted.at(-1);
-      if (!last) continue;
-      // The mailbox name must terminate the line; an unquoted atom after the
-      // last quoted token means the name was an astring we did not parse.
-      if (line.slice((last.index ?? 0) + last[0].length).trim() !== "") continue;
-      out.add(c.decodeMailboxName(last[1].replace(/\\(["\\])/g, "$1")));
+      const name = parseLsubName(item.line, item.literal);
+      if (name) out.add(c.decodeMailboxName(name));
     }
   });
   return out;
