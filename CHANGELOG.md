@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-11-14
 
 - Full folder management: `folder_create`, `folder_rename` and `folder_delete`
   work on both runtimes (Node/imapflow and Workers/cf-imap).
