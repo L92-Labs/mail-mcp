@@ -95,11 +95,12 @@ export function isDescendantFolder(path: string, parent: string, folders: Folder
 
 /**
  * Resolve the server-stored name for a created/renamed folder from a listing:
- * exact match, then case-insensitive, then suffix match at a delimiter
- * boundary (namespace prefixes like "INBOX." store prefixed names for
- * unprefixed arguments; the boundary may also be the child's own separator,
- * e.g. "Work/Foo" stored as "INBOX.Work/Foo"). Returns `wanted` when nothing
- * matches (caller treats it as server truth).
+ * exact full-path match, then the INBOX namespace convention (INBOX token
+ * case-insensitive per RFC 3501, remainder exact — both "." and "/"
+ * delimiter forms), then an exact leaf-name match for namespace-prefix
+ * canonicalization. Everything else returns `wanted` (callers treat it as
+ * server truth; destructive operations then act — and harmlessly fail — on
+ * the raw name instead of a case/lookalike substitute).
  */
 export function resolveStoredName(
   after: Array<{ name?: string; path?: string; delimiter?: string }>,
@@ -115,7 +116,9 @@ export function resolveStoredName(
   // act on an unrelated mailbox.
   const inboxPrefixed = after.find((f) => {
     const p = pathOf(f);
-    return p.slice(0, 6).toLowerCase() === "inbox." && p.slice(6) === wanted;
+    if (!p.toLowerCase().startsWith("inbox") || p.length <= 5) return false;
+    const rest = p.slice(5);
+    return (rest[0] === "." || rest[0] === "/") && rest.slice(1) === wanted;
   });
   if (inboxPrefixed) return pathOf(inboxPrefixed);
   return wanted;
