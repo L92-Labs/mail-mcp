@@ -17,9 +17,11 @@ export function parseLsubName(line: string, literal: Uint8Array | null | undefin
     const decoded = new TextDecoder().decode(literal);
     return decoded.length ? decoded : null;
   }
-  const m = /^\* LSUB \([^)]*\) (?:"((?:[^"\\]|\\.)*)"|NIL|\S+) (.+)$/.exec(line);
+  // Trim the line (transport padding) — the captured mailbox keeps its own
+  // whitespace, which may legitimately be part of the name.
+  const m = /^\* LSUB \([^)]*\) (?:"((?:[^"\\]|\\.)*)"|NIL|\S+) (.+)$/.exec(line.trim());
   if (!m) return null;
-  const mailbox = m[2].trim();
+  const mailbox = m[2];
   if (!mailbox) return null;
   if (mailbox.startsWith('"') && mailbox.endsWith('"') && mailbox.length >= 2) {
     return mailbox.slice(1, -1).replace(/\\(["\\])/g, "$1") || null;

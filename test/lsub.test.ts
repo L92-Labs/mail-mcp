@@ -42,6 +42,14 @@ describe("parseLsubName", () => {
     // not be adopted as a subscribed path.
     expect(parseLsubName("* STATUS () NIL {7}", new TextEncoder().encode("Archive"))).toBeNull();
   });
+
+  it("preserves whitespace in quoted and literal names", () => {
+    // Pass-19 LOW pin: trimming would break exact subscription matching.
+    expect(parseLsubName('* LSUB () "." "INBOX.Sub "', null)).toBe("INBOX.Sub ");
+    expect(parseLsubName('* LSUB () "." {10}', new TextEncoder().encode("INBOX.Sub "))).toBe(
+      "INBOX.Sub ",
+    );
+  });
 });
 
 describe("resolveStoredName", () => {
