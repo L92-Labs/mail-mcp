@@ -515,6 +515,32 @@ describe("folder management", () => {
     expect(b.deleteFolder).not.toHaveBeenCalled();
   });
 
+  it("guards protect configured overrides on prefixed servers", async () => {
+    // Courier-style INBOX. prefix: sent_folder "CustomSent" is stored as
+    // "INBOX.CustomSent" (delivery/listing paths) — the canonical listed
+    // path must be protected even though the configured value is unprefixed
+    // and the listing carries no special-use attribute.
+    const b = fakeBackend({
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "." },
+        { name: "CustomSent", path: "INBOX.CustomSent", delimiter: "." },
+      ]),
+    });
+    const acct = { ...account, sentFolder: "CustomSent" };
+    await expect(
+      dispatchTool("folder_delete", { path: "INBOX.CustomSent", confirm: true }, makeCtx(b, {}, acct)),
+    ).rejects.toThrow(/\\Sent folder/);
+    await expect(
+      dispatchTool("folder_rename", { path: "INBOX.CustomSent", new_path: "X" }, makeCtx(b, {}, acct)),
+    ).rejects.toThrow(/\\Sent folder/);
+    // The unprefixed raw value resolves onto the same protected folder.
+    await expect(
+      dispatchTool("folder_delete", { path: "CustomSent", confirm: true }, makeCtx(b, {}, acct)),
+    ).rejects.toThrow(/\\Sent folder/);
+    expect(b.deleteFolder).not.toHaveBeenCalled();
+    expect(b.renameFolder).not.toHaveBeenCalled();
+  });
+
   it("folder_rename never corrupts case-variant lookalike cursors", async () => {
     // Renaming Old -> New where an unrelated lowercase "new/Notes" exists
     // (case-sensitive server): the case-variant folder keeps its live cursor
