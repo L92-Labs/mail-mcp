@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Fixed phantom moves: `emails_modify` now validates move targets against
+  the server and refuses non-existent folders before any backend call.
+- Fixed malformed-id batch failures: both `findEmails` backends skip
+  uid-less messages (expunge races no longer emit `INBOX:undefined` ids),
+  and `emails_modify` skips malformed ids per-id — the rest of the batch
+  still applies; all-malformed batches surface an explicit error instead
+  of a silent success-shaped no-op.
+- Flag-only `emails_modify` batches skip the folder-listing roundtrip.
+- Move targets: exact listed paths win verbatim (whitespace names
+  preserved); INBOX destinations always exist regardless of the listing's
+  INBOX spelling.
 ## 0.3.0 — 2026-11-14
 
 - Full folder management: `folder_create`, `folder_rename` and `folder_delete`
