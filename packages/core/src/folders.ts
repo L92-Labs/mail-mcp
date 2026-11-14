@@ -94,13 +94,14 @@ export function isDescendantFolder(path: string, parent: string, folders: Folder
 }
 
 /**
- * Resolve the server-stored name for a created/renamed folder from a listing:
- * exact full-path match, then the INBOX namespace convention (INBOX token
- * case-insensitive per RFC 3501, remainder exact — both "." and "/"
- * delimiter forms), then an exact leaf-name match for namespace-prefix
- * canonicalization. Everything else returns `wanted` (callers treat it as
- * server truth; destructive operations then act — and harmlessly fail — on
- * the raw name instead of a case/lookalike substitute).
+ * Resolve the server-stored name for a created/renamed folder from a
+ * listing: exact full-path match, then the INBOX namespace convention
+ * (INBOX token case-insensitive per RFC 3501; the delimiter — "." or "/" —
+ * and the remainder must match exactly), then an exact leaf-name match for
+ * namespace-prefix canonicalization. Everything else returns `wanted`
+ * unchanged: bare child names are ambiguous by design and never resolve,
+ * and destructive operations then act — and harmlessly fail — on the raw
+ * name instead of a case/lookalike substitute.
  */
 export function resolveStoredName(
   after: Array<{ name?: string; path?: string; delimiter?: string }>,

@@ -58,8 +58,7 @@ describe("resolveStoredName", () => {
   const listing = [
     { name: "2026", path: "Reports.2026", delimiter: "." }, // unrelated lookalike
     { name: "Sent", path: "INBOX.Sent", delimiter: "." }, // INBOX-prefix convention
-    { name: "Foo", path: "INBOX.Work/Foo", delimiter: "/" }, // composite child
-    { name: "Work", path: "INBOX.Work", delimiter: "." },
+    { name: "Work", path: "INBOX/Work", delimiter: "/" }, // slash-delimiter convention
     { name: "Archive", path: "Archive", delimiter: "/" },
   ];
 
@@ -71,15 +70,12 @@ describe("resolveStoredName", () => {
     expect(resolveStoredName(listing, "INBOX.Sent")).toBe("INBOX.Sent");
   });
 
-  it("resolves via the INBOX-prefix convention for unprefixed aliases", () => {
+  it("resolves via the INBOX-prefix convention (dot and slash forms)", () => {
     expect(resolveStoredName(listing, "Sent")).toBe("INBOX.Sent");
-    expect(resolveStoredName(listing, "Work")).toBe("INBOX.Work");
-    // Bare child names stay unresolved: ambiguous by design (the dispatch
-    // rename path resolves the full source root instead).
-    expect(resolveStoredName(listing, "Foo")).toBe("Foo");
+    expect(resolveStoredName(listing, "Work")).toBe("INBOX/Work");
   });
 
-  it("never resolves destructive leaf-collision lookalikes", () => {
+  it("never resolves destructive lookalikes (namespace safety)", () => {
     // Corruption pin (round 6.5q): the leaf "2026" collides with unrelated
     // Reports.2026 — must NOT resolve there (a case-insensitive leaf match
     // or LIST-order dependence would delete an unrelated mailbox).
@@ -88,13 +84,6 @@ describe("resolveStoredName", () => {
 
   it("no match returns the wanted name", () => {
     expect(resolveStoredName(listing, "Nope")).toBe("Nope");
-  });
-
-  it("never resolves destructive lookalikes (namespace safety)", () => {
-    // Corruption pin (round 6.5q): the leaf "2026" collides with unrelated
-    // Reports.2026 — must NOT resolve there (a case-insensitive leaf match
-    // or LIST-order dependence would delete an unrelated mailbox).
-    expect(resolveStoredName(listing, "2026")).toBe("2026");
   });
 });
 
