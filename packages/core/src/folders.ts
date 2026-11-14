@@ -111,11 +111,6 @@ export function resolveStoredName(
   if (byPath) return pathOf(byPath);
   const ciPath = after.find((f) => pathOf(f).toLowerCase() === lower);
   if (ciPath) return pathOf(ciPath);
-  const byLeaf = after.find((f) => (f.name ?? "").toLowerCase() === lower);
-  if (byLeaf) return pathOf(byLeaf);
-  // Namespace-prefix suffix: stored "INBOX.Work/Foo" for wanted "Work/Foo" —
-  // the boundary may be the stored folder's own delimiter or either common
-  // separator (prefix convention varies per server).
   // Namespace-prefix convention: personal mailboxes on prefixed servers are
   // stored as "INBOX.<wanted>" (or "INBOX<delimiter><wanted>" with the
   // server's own delimiter). Anything else — e.g. unrelated "Reports.2026"

@@ -54,26 +54,34 @@ describe("parseLsubName", () => {
 });
 
 describe("resolveStoredName", () => {
+  // Worker-shaped entries: name = leaf segment, path = full stored path.
   const listing = [
-    { name: "INBOX", delimiter: "." },
-    { name: "INBOX.Work", delimiter: "." },
-    { name: "INBOX.Work/Foo", delimiter: "/" },
-    { name: "Archive", delimiter: "/" },
+    { name: "2026", path: "Reports.2026", delimiter: "." }, // unrelated lookalike
+    { name: "Sent", path: "INBOX.Sent", delimiter: "." }, // INBOX-prefix convention
+    { name: "Foo", path: "INBOX.Work/Foo", delimiter: "/" }, // composite child
+    { name: "Work", path: "INBOX.Work", delimiter: "." },
+    { name: "Archive", path: "Archive", delimiter: "/" },
   ];
 
-  it("exact match wins", () => {
+  it("resolves exact and case-insensitive full paths", () => {
     expect(resolveStoredName(listing, "Archive")).toBe("Archive");
-    expect(resolveStoredName(listing, "INBOX.Work")).toBe("INBOX.Work");
-  });
-
-  it("case-insensitive match second", () => {
     expect(resolveStoredName(listing, "archive")).toBe("Archive");
-    expect(resolveStoredName(listing, "inbox.work")).toBe("INBOX.Work");
+    expect(resolveStoredName(listing, "INBOX.Sent")).toBe("INBOX.Sent");
   });
 
-  it("delimiter-aware suffix match resolves prefixed stored names", () => {
+  it("resolves via the INBOX-prefix convention for unprefixed aliases", () => {
+    expect(resolveStoredName(listing, "Sent")).toBe("INBOX.Sent");
     expect(resolveStoredName(listing, "Work")).toBe("INBOX.Work");
-    expect(resolveStoredName(listing, "Work/Foo")).toBe("INBOX.Work/Foo");
+    // Bare child names stay unresolved: ambiguous by design (the dispatch
+    // rename path resolves the full source root instead).
+    expect(resolveStoredName(listing, "Foo")).toBe("Foo");
+  });
+
+  it("never resolves destructive leaf-collision lookalikes", () => {
+    // Corruption pin (round 6.5q): the leaf "2026" collides with unrelated
+    // Reports.2026 — must NOT resolve there (a case-insensitive leaf match
+    // or LIST-order dependence would delete an unrelated mailbox).
+    expect(resolveStoredName(listing, "2026")).toBe("2026");
   });
 
   it("no match returns the wanted name", () => {
@@ -81,10 +89,9 @@ describe("resolveStoredName", () => {
   });
 
   it("never resolves destructive lookalikes (namespace safety)", () => {
-    // Corruption pin (round 6.5n): unrelated Reports.2026 must not resolve
-    // for wanted 2026 — folder_delete would otherwise delete an unrelated
-    // mailbox. The INBOX-prefix convention only.
+    // Corruption pin (round 6.5q): the leaf "2026" collides with unrelated
+    // Reports.2026 — must NOT resolve there (a case-insensitive leaf match
+    // or LIST-order dependence would delete an unrelated mailbox).
     expect(resolveStoredName(listing, "2026")).toBe("2026");
-    expect(resolveStoredName(listing, "Sent")).toBe("Sent");
   });
 });
