@@ -183,9 +183,11 @@ function isParentOf(path: string, other: string, folders: FolderInfo[]): boolean
 
 /** Separator aliasing ("Sent/", "Clients//Sent") must fail closed, never normalize into a protected folder. */
 export function rejectSeparatorTricks(path: string, folders: FolderInfo[]): void {
-  const seps = [
-    ...new Set([sharedDelimiter(folders), ...folders.map((f) => f.delimiter)].filter((d): d is string => Boolean(d))),
-  ];
+  // Explicitly flat namespace (every reported delimiter is "" / NIL): dots
+  // and slashes are literal characters — no hierarchy, no aliasing tricks.
+  const defined = folders.map((f) => f.delimiter).filter((d) => d !== undefined);
+  if (defined.length > 0 && defined.every((d) => d === "")) return;
+  const seps = [...new Set([sharedDelimiter(folders), ...defined].filter((s): s is string => Boolean(s)))];
   if (seps.length === 0) seps.push("/", ".");
   for (const d of seps) {
     if (path.endsWith(d)) throw new Error(`folder path must not end with "${d}"`);

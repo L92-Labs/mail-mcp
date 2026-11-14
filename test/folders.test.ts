@@ -169,4 +169,13 @@ describe("flat namespaces (NIL delimiter)", () => {
     expect(assertFolderManageable("Old", flat, "delete")).toBe("Old");
     expect(() => assertFolderManageable("INBOX.Sent", flat, "delete")).toThrow(/\\Sent folder/);
   });
+
+  it("allows literal dots and slashes in flat-namespace names", () => {
+    // Codex P2 (round 6.5t2 era): on flat namespaces dots/slashes are
+    // literal characters — ordinary names like Receipts. or Reports..2026
+    // rename and delete freely.
+    expect(assertFolderManageable("Receipts.", flat, "rename")).toBe("Receipts.");
+    expect(assertFolderManageable("Reports..2026", flat, "delete")).toBe("Reports..2026");
+    expect(assertFolderManageable("Old/Child", flat, "rename")).toBe("Old/Child");
+  });
 });
