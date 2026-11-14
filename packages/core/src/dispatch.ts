@@ -25,6 +25,7 @@ import {
   assertFolderManageable,
   assertNotInbox,
   findProtectedFolder,
+  isDescendantFolder,
   isInboxPath,
   normalizeFolderPath,
   rejectSeparatorTricks,
@@ -325,16 +326,6 @@ function errMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** True when `path` is a strict descendant of `parent` (delimiter-aware). */
-function isDescendantOf(path: string, parent: string, folders: FolderInfo[]): boolean {
-  const lowerPath = path.toLowerCase();
-  const lowerParent = parent.toLowerCase();
-  const own = folders.find((f) => f.path.toLowerCase() === lowerPath)?.delimiter;
-  const shared = folders.find((f) => f.delimiter)?.delimiter;
-  const seps = [...new Set([own, shared, "/", "."].filter((d): d is string => Boolean(d)))];
-  return seps.some((d) => lowerPath.startsWith(`${lowerParent}${d}`)) && lowerPath !== lowerParent;
-}
-
 function attachmentsArg(list?: Array<{ filename: string; content: string; content_type?: string }>) {
   return list?.map((a) => ({ filename: a.filename, content: a.content, contentType: a.content_type }));
 }
@@ -428,7 +419,7 @@ export async function dispatchTool(
       try {
         const folders = await listFolders(ctx, account);
         for (const f of folders) {
-          if (f.path !== result.newPath && !isDescendantOf(f.path, result.newPath, folders)) continue;
+          if (f.path !== result.newPath && !isDescendantFolder(f.path, result.newPath, folders)) continue;
           const suffix = f.path.slice(result.newPath.length);
           const oldKey = eventCursorKey(account.name, result.path + suffix);
           const stored = await ctx.cursors.get(oldKey);

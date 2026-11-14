@@ -386,6 +386,67 @@ describe("folder management", () => {
     expect(deleted2).toEqual([]);
   });
 
+  it("folder_rename never touches dot-suffixed lookalikes on known-delimiter servers", async () => {
+    // Slash-delimiter server (GreenMail, Cyrus, most hosted IMAP): a folder
+    // named "Archive/Work.2024" is unrelated to "Work" and must keep its cursor.
+    const b = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "Work", path: "Archive/Work", delimiter: "/" },
+        { name: "Work.2024", path: "Archive/Work.2024", delimiter: "/" },
+      ]),
+    });
+    const ctx = makeCtx(b);
+    const sets = new Map<string, string>();
+    const deleted: string[] = [];
+    const cursors = new Map([
+      ["events:uid:default:Work", "50"],
+      ["events:uid:default:Work.2024", "7"],
+      ["events:uid:default:Archive/Work.2024", "9"],
+    ]);
+    ctx.cursors = {
+      get: async (key: string) => cursors.get(key) ?? null,
+      set: async (key: string, value: string) => {
+        sets.set(key, value);
+        cursors.set(key, value);
+      },
+      delete: async (key: string) => {
+        deleted.push(key);
+        cursors.delete(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work" }, ctx);
+    expect(sets.get("events:uid:default:Archive/Work")).toBe("50");
+    expect(deleted).toEqual(["events:uid:default:Work"]);
+    expect(sets.has("events:uid:default:Archive/Work.2024")).toBe(false);
+    expect(deleted).not.toContain("events:uid:default:Archive/Work.2024");
+    expect(deleted).not.toContain("events:uid:default:Work.2024");
+    expect(cursors.get("events:uid:default:Archive/Work.2024")).toBe("9");
+
+    // Unknown delimiter (server reports none): both separators are candidates,
+    // so the dot-suffixed name IS treated as a descendant — fail-closed.
+    const b2 = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX" },
+        { name: "Work", path: "Archive/Work" },
+        { name: "Work.2024", path: "Archive/Work.2024" },
+      ]),
+    });
+    const ctx2 = makeCtx(b2);
+    const sets2 = new Map<string, string>();
+    ctx2.cursors = {
+      get: async (key: string) => (key === "events:uid:default:Work.2024" ? "7" : null),
+      set: async (key: string, value: string) => {
+        sets2.set(key, value);
+      },
+      delete: async () => {},
+    };
+    await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work" }, ctx2);
+    expect(sets2.get("events:uid:default:Archive/Work.2024")).toBe("7");
+  });
+
   it("folder_delete drops the event cursor of the deleted path", async () => {
     const b = fakeBackend();
     const ctx = makeCtx(b);

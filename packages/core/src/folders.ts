@@ -41,6 +41,19 @@ function separatorsFor(path: string, folders: FolderInfo[]): string[] {
   return ["/", "."];
 }
 
+/**
+ * True when `path` is a strict descendant of `parent`, using the child's own
+ * delimiter when the listing provides one, else the shared delimiter, else
+ * both common separators when the server reports none. Kept next to
+ * isParentOf so the two ancestry checks cannot drift.
+ */
+export function isDescendantFolder(path: string, parent: string, folders: FolderInfo[]): boolean {
+  const lowerPath = path.toLowerCase();
+  const lowerParent = parent.toLowerCase();
+  if (lowerPath === lowerParent) return false;
+  return separatorsFor(path, folders).some((d) => lowerPath.startsWith(`${lowerParent}${d}`));
+}
+
 /** True when `path` is an ancestor of `other` (servers rename/delete children along). */
 function isParentOf(path: string, other: string, folders: FolderInfo[]): boolean {
   return separatorsFor(other, folders).some(
