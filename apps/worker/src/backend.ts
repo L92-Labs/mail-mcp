@@ -255,6 +255,7 @@ export function createWorkerBackend(): MailBackend {
             path: f.name,
             specialUse: normalizeSpecialUse(f.attributes),
             delimiter: f.delimiter || undefined,
+            subscribed: f.attributes?.some((a) => a.toLowerCase() === "subscribed") || undefined,
           }),
         );
       });
@@ -421,12 +422,22 @@ export function createWorkerBackend(): MailBackend {
             name: f.name.split(f.delimiter || "/").pop() || f.name,
             path: f.name,
             delimiter: f.delimiter || undefined,
+            subscribed:
+              f.attributes?.some((a) => a.toLowerCase() === "subscribed") || undefined,
           }));
         } catch {
           // best-effort
         }
+        // Migrate exactly the children the server reports as subscribed; when
+        // the listing reports no subscription state at all, every mailbox is
+        // assumed subscribed (RFC 3501) and all children migrate.
+        const reportsState = folders.some((f) => f.subscribed !== undefined);
         const oldChildren = folders
-          .filter((f) => isDescendantFolder(f.path, path, folders))
+          .filter(
+            (f) =>
+              isDescendantFolder(f.path, path, folders) &&
+              (reportsState ? f.subscribed === true : true),
+          )
           .map((f) => f.path);
         const oldName = quoteMailbox(c.encodeMailboxName(path));
         const newName = quoteMailbox(c.encodeMailboxName(newPath));

@@ -300,9 +300,12 @@ async function main() {
     const parent = `INBOX${delim}E2EP`;
     await call("folder_create", { path: parent });
     await call("folder_create", { path: `${parent}${delim}Sub` });
+    await call("folder_create", { path: `${parent}${delim}Unsub` });
     await imap("me@example.com", async (client) => {
       await client.mailboxSubscribe(parent);
       await client.mailboxSubscribe(`${parent}${delim}Sub`);
+      // imapflow auto-subscribes on CREATE; this child must start unsubscribed.
+      await client.mailboxUnsubscribe(`${parent}${delim}Unsub`);
     });
     const renamedParent = `INBOX${delim}E2ERenamed`;
     await call("folder_rename", { path: parent, new_path: renamedParent });
@@ -315,8 +318,14 @@ async function main() {
       subState[renamedParent] === true && subState[`${renamedParent}${delim}Sub`] === true,
       subState,
     );
+    check(
+      "rename leaves previously unsubscribed children alone",
+      subState[`${renamedParent}${delim}Unsub`] !== true,
+      subState,
+    );
     await call("folder_delete", { path: renamedParent, confirm: true });
     await call("folder_delete", { path: `${renamedParent}${delim}Sub`, confirm: true });
+    await call("folder_delete", { path: `${renamedParent}${delim}Unsub`, confirm: true });
 
     // Events: stateless watermark
     const seed = await call("emails_events", {});

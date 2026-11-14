@@ -60,6 +60,8 @@ export type FolderInfo = {
   specialUse?: string;
   /** Hierarchy separator, e.g. "/" or "."; empty when the server reports none. */
   delimiter?: string;
+  /** Subscription state; undefined when the server does not report it. */
+  subscribed?: boolean;
 };
 
 export type EmailAttachment = {

@@ -233,6 +233,7 @@ export function createNodeBackend(): MailBackend {
             path: b.path,
             specialUse: normalizeSpecialUse(b.specialUse),
             delimiter: b.delimiter || undefined,
+            subscribed: b.subscribed,
           }),
         );
       });
@@ -450,12 +451,21 @@ export function createNodeBackend(): MailBackend {
             name: b.name,
             path: b.path,
             delimiter: b.delimiter || undefined,
+            subscribed: b.subscribed,
           }));
         } catch {
           // best-effort
         }
+        // Migrate exactly the children the server reports as subscribed; when
+        // the listing reports no subscription state at all, every mailbox is
+        // assumed subscribed (RFC 3501) and all children migrate.
+        const reportsState = folders.some((f) => f.subscribed !== undefined);
         const oldChildren = folders
-          .filter((f) => isDescendantFolder(f.path, path, folders))
+          .filter(
+            (f) =>
+              isDescendantFolder(f.path, path, folders) &&
+              (reportsState ? f.subscribed === true : true),
+          )
           .map((f) => f.path);
         const res = await client.mailboxRename(path, newPath);
         const canonical = res?.newPath ?? newPath;
@@ -467,8 +477,8 @@ export function createNodeBackend(): MailBackend {
         }
         for (const child of oldChildren) {
           try {
-            await client.mailboxSubscribe(`${canonical}${child.slice(path.length)}`);
-            await client.mailboxUnsubscribe(child);
+            const ok = await client.mailboxSubscribe(`${canonical}${child.slice(path.length)}`);
+            if (ok !== false) await client.mailboxUnsubscribe(child);
           } catch {
             // best-effort
           }
