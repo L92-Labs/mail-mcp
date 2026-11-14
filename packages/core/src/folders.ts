@@ -52,10 +52,9 @@ function separatorsFor(path: string, folders: FolderInfo[]): string[] {
  */
 export function isDescendantFolder(path: string, parent: string, folders: FolderInfo[]): boolean {
   if (path === parent) return false;
-  const own = folders.find((f) => f.path === path)?.delimiter;
-  const shared = sharedDelimiter(folders);
-  const seps = own || shared ? [own ?? shared] : ["/", "."];
-  return seps.some((d) => path.startsWith(`${parent}${d}`));
+  // Exact-case matching via separatorsFor: a false positive here corrupts an
+  // unrelated folder's cursor, so precision wins over fail-closed breadth.
+  return separatorsFor(path, folders).some((d) => path.startsWith(`${parent}${d}`));
 }
 
 /** True when `path` is an ancestor of `other` (servers rename/delete children along). */

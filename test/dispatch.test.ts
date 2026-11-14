@@ -476,6 +476,48 @@ describe("folder management", () => {
     expect(sets2.get("events:uid:default:new/Notes")).toBeUndefined();
   });
 
+  it("folder_rename never corrupts case-variant lookalike cursors", async () => {
+    // Renaming Old -> New where an unrelated lowercase "new/Notes" exists
+    // (case-sensitive server): the case-variant folder keeps its live cursor
+    // and the true child "Old/2024" migrates. A case-insensitive descendant
+    // match would delete or overwrite the "new/Notes" cursor here.
+    const b2 = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "Old", newPath: "New" })),
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "New", path: "New", delimiter: "/" },
+        { name: "Notes", path: "new/Notes", delimiter: "/" },
+        { name: "2024", path: "New/2024", delimiter: "/" },
+      ]),
+    });
+    const ctx2 = makeCtx(b2);
+    const sets2 = new Map<string, string>();
+    const deleted2: string[] = [];
+    const cursors2 = new Map([
+      ["events:uid:default:Old/2024", "12"],
+      ["events:uid:default:new/Notes", "7"],
+    ]);
+    ctx2.cursors = {
+      get: async (key: string) => cursors2.get(key) ?? null,
+      set: async (key: string, value: string) => {
+        sets2.set(key, value);
+        cursors2.set(key, value);
+      },
+      delete: async (key: string) => {
+        deleted2.push(key);
+        cursors2.delete(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "Old", new_path: "New" }, ctx2);
+    // Positive control: the true child migrates.
+    expect(sets2.get("events:uid:default:New/2024")).toBe("12");
+    expect(deleted2).toContain("events:uid:default:Old/2024");
+    // Exactness: the case-variant lookalike keeps its cursor untouched.
+    expect(deleted2).not.toContain("events:uid:default:new/Notes");
+    expect(sets2.has("events:uid:default:Archive/New/Notes")).toBe(false);
+    expect(cursors2.get("events:uid:default:new/Notes")).toBe("7");
+  });
+
   it("folder_delete drops the event cursor of the deleted path", async () => {
     const b = fakeBackend();
     const ctx = makeCtx(b);
