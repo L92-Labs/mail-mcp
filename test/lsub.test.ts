@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveStoredName } from "@mail-mcp/core";
+import { resolveProtectedName, resolveStoredName } from "@mail-mcp/core";
 import { parseLsubName } from "../apps/worker/src/lsub.js";
 
 // Worker-runtime module (cf-imap has no folder-management API), so the LSUB
@@ -93,5 +93,24 @@ describe("resolveStoredName", () => {
     // Reports.2026 — must NOT resolve there (a case-insensitive leaf match
     // or LIST-order dependence would delete an unrelated mailbox).
     expect(resolveStoredName(listing, "2026")).toBe("2026");
+  });
+});
+
+describe("resolveProtectedName", () => {
+  // Non-INBOX namespace prefix (e.g. Courier "Folders."): the guard
+  // resolution over-protects — a bare-leaf override resolves onto the
+  // prefixed stored path.
+  const listing = [
+    { name: "Folders.Sent", path: "Folders.Sent", delimiter: "." },
+    { name: "Folders.Work/Foo", path: "Folders.Work/Foo", delimiter: "/" },
+  ];
+
+  it("resolves bare-leaf overrides onto prefixed stored paths", () => {
+    expect(resolveProtectedName(listing, "Sent")).toBe("Folders.Sent");
+    expect(resolveProtectedName(listing, "Work/Foo")).toBe("Folders.Work/Foo");
+  });
+
+  it("falls back to the wanted name when nothing matches", () => {
+    expect(resolveProtectedName(listing, "Nope")).toBe("Nope");
   });
 });

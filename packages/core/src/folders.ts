@@ -126,6 +126,34 @@ export function resolveStoredName(
   return wanted;
 }
 
+/**
+ * Guard-direction resolution: like resolveStoredName, but the namespace
+ * suffix falls back to any common delimiter boundary — over-resolving is
+ * safe here (the result only ever widens protection), while under-resolving
+ * would leave the real folder unprotected.
+ */
+export function resolveProtectedName(
+  after: Array<{ name?: string; path?: string; delimiter?: string }>,
+  wanted: string,
+): string {
+  const lower = wanted.toLowerCase();
+  const pathOf = (f: { name?: string; path?: string }): string => f.path ?? f.name ?? "";
+  const byPath = after.find((f) => pathOf(f) === wanted);
+  if (byPath) return pathOf(byPath);
+  const ciPath = after.find((f) => pathOf(f).toLowerCase() === lower);
+  if (ciPath) return pathOf(ciPath);
+  const byLeaf = after.find((f) => (f.name ?? "").toLowerCase() === lower);
+  if (byLeaf) return pathOf(byLeaf);
+  const prefixed = after.find((f) => {
+    const delim = f.delimiter;
+    const pathLower = pathOf(f).toLowerCase();
+    const seps = [delim, "/", "."].filter((s): s is string => Boolean(s));
+    return seps.some((s) => pathLower.endsWith(`${s.toLowerCase()}${lower}`));
+  });
+  if (prefixed) return pathOf(prefixed);
+  return wanted;
+}
+
 /** True when `path` is an ancestor of `other` (servers rename/delete children along). */
 function isParentOf(path: string, other: string, folders: FolderInfo[]): boolean {
   return separatorsFor(other, folders).some(

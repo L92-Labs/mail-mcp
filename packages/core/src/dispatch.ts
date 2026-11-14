@@ -29,6 +29,7 @@ import {
   isInboxPath,
   normalizeFolderPath,
   rejectSeparatorTricks,
+  resolveProtectedName,
   resolveStoredName,
   type ProtectedFolder,
 } from "./folders.js";
@@ -228,7 +229,8 @@ function protectedFolders(account: EmailAccount, folders: FolderInfo[]): Protect
     if (!configured) continue;
     // Resolve to the server-stored path (namespace prefix / case may differ
     // from the configured value — delivery/listing use the canonical form).
-    const canonical = resolveStoredName(folders, configured);
+    // Guard direction: over-resolving only widens protection.
+    const canonical = resolveProtectedName(folders, configured);
     if (!seen.has(canonical)) {
       seen.add(canonical);
       resolved.push({ path: canonical, use: SPECIAL_USE[kind] });
