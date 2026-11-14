@@ -15,12 +15,20 @@ import {
   parseFolderAlias,
   resolveSpecialFolder,
   shouldSaveSent,
+  SPECIAL_USE,
   truncate,
   type ReplyInput,
   type SpecialFolder,
 } from "./compose.js";
 import { pollNewMessages } from "./events.js";
-import { assertFolderManageable, isInboxPath, normalizeFolderPath } from "./folders.js";
+import {
+  assertFolderManageable,
+  assertNotInbox,
+  findProtectedFolder,
+  isInboxPath,
+  normalizeFolderPath,
+  type ProtectedFolder,
+} from "./folders.js";
 import {
   accountsListSchema,
   draftEmailSchema,
@@ -86,7 +94,7 @@ export const TOOL_META: ToolMeta[] = [
     name: "folder_create",
     title: "Create folder",
     description:
-      "Create a folder, e.g. \"Receipts\" or nested \"INBOX/Receipts\" (separator comes from folders_list). Missing parent folders are created by most servers. INBOX and the special folders cannot be created.",
+      "Create a folder, e.g. \"Receipts\" or nested \"INBOX/Receipts\" (separator comes from folders_list). Missing parent folders are created by most servers. Returns created:false when the folder already exists. INBOX and special folders cannot be created.",
     inputSchema: folderCreateSchema,
     readOnly: false,
   },
@@ -94,7 +102,7 @@ export const TOOL_META: ToolMeta[] = [
     name: "folder_rename",
     title: "Rename folder",
     description:
-      "Rename or move a folder (children follow). INBOX and special folders (Sent, Drafts, Trash, Archive, Junk) cannot be renamed.",
+      "Rename or move a folder (children follow). Both the folder and its new path are guarded: INBOX and special folders (Sent, Drafts, Trash, Archive, Junk) cannot be renamed or become a rename destination.",
     inputSchema: folderRenameSchema,
     readOnly: false,
   },
@@ -187,9 +195,29 @@ async function listFolders(ctx: DispatchContext, account: EmailAccount): Promise
   return cachedJson(
     ctx.cache,
     ctx.config.cacheTtlSeconds,
-    cacheKey(["folders", account.name]),
+    cacheKey(["folders", account.name, await cacheGeneration(ctx, account)]),
     () => ctx.backend.listFolders(account),
   );
+}
+
+/**
+ * Folders the guard must keep intact beyond server-advertised special use:
+ * configured sent/drafts overrides and the same name-based fallbacks the
+ * special-folder resolver uses, so protection matches what the server
+ * actually relies on even without RFC 6154 attributes.
+ */
+function protectedFolders(account: EmailAccount, folders: FolderInfo[]): ProtectedFolder[] {
+  const resolved: ProtectedFolder[] = [];
+  const seen = new Set(folders.filter((f) => f.specialUse).map((f) => f.path));
+  for (const kind of ["sent", "drafts", "trash", "archive", "junk"] as const satisfies SpecialFolder[]) {
+    const override = kind === "sent" ? account.sentFolder : kind === "drafts" ? account.draftsFolder : undefined;
+    const path = override ?? resolveSpecialFolder(folders, kind);
+    if (path && !seen.has(path)) {
+      seen.add(path);
+      resolved.push({ path, use: SPECIAL_USE[kind] });
+    }
+  }
+  return resolved;
 }
 
 async function specialFolder(
@@ -331,24 +359,34 @@ export async function dispatchTool(
       const parsed = folderCreateSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
       const path = normalizeFolderPath(parsed.path);
+      if (isInboxPath(path)) {
+        throw new Error('INBOX already exists; create a subfolder instead, e.g. "INBOX/…"');
+      }
+      const folders = await listFolders(ctx, account);
+      const special = findProtectedFolder(path, folders, protectedFolders(account, folders));
+      if (special) {
+        throw new Error(`"${special.path}" already exists as the ${special.use} special folder`);
+      }
       const result = await ctx.backend.createFolder(account, path);
       await bumpCache(ctx, account);
       return {
         created: result.created,
         folder: result.path,
-        ...(isInboxPath(result.path) ? { note: "INBOX always exists; most servers report it as already created" } : {}),
       };
     }
 
     case "folder_rename": {
       const parsed = folderRenameSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
+      assertNotInbox(parsed.path, "rename");
       const folders = await listFolders(ctx, account);
-      const path = assertFolderManageable(parsed.path, folders, "rename");
+      const path = assertFolderManageable(parsed.path, folders, "rename", protectedFolders(account, folders));
       const newPath = normalizeFolderPath(parsed.new_path);
-      if (newPath.toLowerCase() === path.toLowerCase()) {
+      if (newPath === path) {
         throw new Error("new_path must differ from path");
       }
+      // The destination becomes a parent on some servers; guard it like a source.
+      assertFolderManageable(newPath, folders, "rename", protectedFolders(account, folders));
       const result = await ctx.backend.renameFolder(account, path, newPath);
       await bumpCache(ctx, account);
       return { renamed: true, folder: result.path, new_folder: result.newPath };
@@ -360,8 +398,9 @@ export async function dispatchTool(
       if (parsed.confirm !== true) {
         throw new Error('folder_delete requires confirm:true — deleting removes the folder and every message in it');
       }
+      assertNotInbox(parsed.path, "delete");
       const folders = await listFolders(ctx, account);
-      const path = assertFolderManageable(parsed.path, folders, "delete");
+      const path = assertFolderManageable(parsed.path, folders, "delete", protectedFolders(account, folders));
       const result = await ctx.backend.deleteFolder(account, path);
       await bumpCache(ctx, account);
       return { deleted: true, folder: result.path };

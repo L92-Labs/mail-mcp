@@ -224,6 +224,10 @@ function quoteMailbox(name: string): string {
 
 /** One tagged IMAP command; throws with the server's NO/BAD text on failure. */
 async function mailboxCommand(client: CFImap, line: string): Promise<void> {
+  // Defense in depth: a stray CR/LF would terminate the command early and let
+  // the remainder run as a new IMAP command. Tool inputs are already screened
+  // in core; this protects direct backend calls.
+  if (/[\r\n]/.test(line)) throw new Error("IMAP command contains a line break");
   const c = internals(client);
   await c.command(async () => {
     c.requireConnection();
@@ -231,6 +235,12 @@ async function mailboxCommand(client: CFImap, line: string): Promise<void> {
     await c.send(tag, line);
     await c.stream.readUntilTag(tag);
   });
+}
+
+/** Servers signal duplicate CREATE with an [ALREADYEXISTS] code or plain text. */
+function isAlreadyExists(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bALREADYEXISTS\b|already exists/i.test(message);
 }
 
 export function createWorkerBackend(): MailBackend {
@@ -383,7 +393,12 @@ export function createWorkerBackend(): MailBackend {
       return withImap(account, async (client) => {
         const c = internals(client);
         const name = quoteMailbox(c.encodeMailboxName(path));
-        await mailboxCommand(client, `CREATE ${name}`);
+        try {
+          await mailboxCommand(client, `CREATE ${name}`);
+        } catch (error) {
+          if (isAlreadyExists(error)) return { path, created: false };
+          throw error;
+        }
         // Subscribe so the folder shows up for clients listing subscribed mailboxes only.
         try {
           await mailboxCommand(client, `SUBSCRIBE ${name}`);

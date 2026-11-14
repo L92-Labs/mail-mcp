@@ -183,6 +183,13 @@ function normalizeSpecialUse(value?: string): string | undefined {
   return KNOWN_SPECIAL_USE.has(v) ? v : undefined;
 }
 
+/** Servers signal duplicate CREATE with an [ALREADYEXISTS] code or plain text. */
+function isAlreadyExists(error: unknown): boolean {
+  const e = error as { response?: string; responseText?: string; message?: string };
+  const text = `${e?.response ?? ""} ${e?.responseText ?? ""} ${e?.message ?? ""}`;
+  return /\bALREADYEXISTS\b|already exists/i.test(text);
+}
+
 function toMailOptions(msg: OutgoingMessage): Mail.Options {
   return {
     from: msg.from.name ? { name: msg.from.name, address: msg.from.address } : msg.from.address,
@@ -407,7 +414,14 @@ export function createNodeBackend(): MailBackend {
 
     async createFolder(account, path) {
       return withImap(account, async (client) => {
-        const res = await client.mailboxCreate(path);
+        let res;
+        try {
+          res = await client.mailboxCreate(path);
+        } catch (error) {
+          // imapflow throws NO on duplicates (contrary to its docs); normalize to created:false.
+          if (isAlreadyExists(error)) return { path, created: false };
+          throw error;
+        }
         // imapflow subscribes on create; keep the result shape backend-agnostic.
         return { path: res?.path ?? path, created: res?.created !== false };
       });

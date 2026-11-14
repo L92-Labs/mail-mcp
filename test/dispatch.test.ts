@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   authorizeBearer,
   dispatchTool,
+  memoryCache,
   memoryCursorStore,
   toolsForMode,
   type DispatchContext,
@@ -66,6 +67,7 @@ function makeCtx(
   backend: MailBackend,
   over: Partial<RuntimeConfig> = {},
   acct: EmailAccount = account,
+  withCache = false,
 ): DispatchContext {
   const config: RuntimeConfig = {
     accounts: { default: acct },
@@ -80,7 +82,7 @@ function makeCtx(
     attachmentMaxBytes: 2_000_000,
     ...over,
   };
-  return { config, backend, cursors: memoryCursorStore() };
+  return { config, backend, cache: withCache ? memoryCache() : undefined, cursors: memoryCursorStore() };
 }
 
 const sentMsg = (b: ReturnType<typeof fakeBackend>) =>
@@ -327,6 +329,33 @@ describe("folder management", () => {
     ).resolves.toMatchObject({ created: true });
   });
 
+  it("folder_create refuses INBOX and existing special folders", async () => {
+    const b = fakeBackend();
+    await expect(dispatchTool("folder_create", { path: "inbox" }, makeCtx(b))).rejects.toThrow(/INBOX already exists/);
+    await expect(dispatchTool("folder_create", { path: "Sent" }, makeCtx(b))).rejects.toThrow(
+      /already exists as the \\Sent special folder/,
+    );
+    expect(b.createFolder).not.toHaveBeenCalled();
+  });
+
+  it("folder_create reports created:false for duplicates", async () => {
+    const b = fakeBackend({ createFolder: vi.fn(async () => ({ path: "Receipts", created: false })) });
+    await expect(dispatchTool("folder_create", { path: "Receipts" }, makeCtx(b))).resolves.toMatchObject({
+      created: false,
+    });
+  });
+
+  it("folder mutations invalidate the folders_list cache", async () => {
+    const b = fakeBackend();
+    const ctx = makeCtx(b, { cacheTtlSeconds: 120 }, account, true);
+    await dispatchTool("folders_list", {}, ctx);
+    await dispatchTool("folders_list", {}, ctx);
+    expect(b.listFolders).toHaveBeenCalledTimes(1);
+    await dispatchTool("folder_create", { path: "Receipts" }, ctx);
+    await dispatchTool("folders_list", {}, ctx);
+    expect(b.listFolders).toHaveBeenCalledTimes(2);
+  });
+
   it("folder_rename renames a regular folder", async () => {
     const b = fakeBackend();
     const r = (await dispatchTool(
@@ -336,6 +365,37 @@ describe("folder management", () => {
     )) as { renamed: boolean; folder: string; new_folder: string };
     expect(b.renameFolder).toHaveBeenCalledWith(account, "Receipts", "Archive/Receipts");
     expect(r).toMatchObject({ renamed: true, folder: "Receipts", new_folder: "Archive/Receipts" });
+  });
+
+  it("folder_rename allows case-only renames but refuses no-op renames", async () => {
+    const b = fakeBackend();
+    await dispatchTool("folder_rename", { path: "Receipts", new_path: "receipts" }, makeCtx(b));
+    expect(b.renameFolder).toHaveBeenCalledWith(account, "Receipts", "receipts");
+    await expect(
+      dispatchTool("folder_rename", { path: "Receipts", new_path: " Receipts " }, makeCtx(b)),
+    ).rejects.toThrow(/must differ/);
+    expect(b.renameFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it("folder_rename guards the destination too", async () => {
+    const b = fakeBackend();
+    await expect(
+      dispatchTool("folder_rename", { path: "Receipts", new_path: "INBOX" }, makeCtx(b)),
+    ).rejects.toThrow(/INBOX cannot be renamed/);
+    await expect(
+      dispatchTool("folder_rename", { path: "Receipts", new_path: "Trash" }, makeCtx(b)),
+    ).rejects.toThrow(/\\Trash folder/);
+    expect(b.renameFolder).not.toHaveBeenCalled();
+  });
+
+  it("folder_rename refuses INBOX before contacting the server", async () => {
+    const b = fakeBackend({ listFolders: vi.fn(async () => { throw new Error("imap down"); }) });
+    await expect(
+      dispatchTool("folder_rename", { path: "INBOX", new_path: "X" }, makeCtx(b)),
+    ).rejects.toThrow(/INBOX cannot be renamed/);
+    await expect(
+      dispatchTool("folder_delete", { path: "INBOX", confirm: true }, makeCtx(b)),
+    ).rejects.toThrow(/INBOX cannot be deleted/);
   });
 
   it("folder_rename refuses INBOX and special folders", async () => {
@@ -359,6 +419,39 @@ describe("folder management", () => {
     await expect(
       dispatchTool("folder_rename", { path: "Clients", new_path: "Customers" }, makeCtx(b)),
     ).rejects.toThrow(/contains the special folder/);
+  });
+
+  it("protects configured sent/drafts folders and name-resolved specials", async () => {
+    const b = fakeBackend();
+    const acct = { ...account, draftsFolder: "X/Drafts" };
+    await expect(
+      dispatchTool("folder_delete", { path: "X/Drafts", confirm: true }, makeCtx(b, {}, acct)),
+    ).rejects.toThrow(/\\Drafts folder/);
+    // "Sent" has no specialUse attribute in FOLDERS; the name-based resolver protects it.
+    await expect(
+      dispatchTool("folder_delete", { path: "Sent", confirm: true }, makeCtx(b)),
+    ).rejects.toThrow(/special folder/);
+    expect(b.deleteFolder).not.toHaveBeenCalled();
+  });
+
+  it("folder_rename refuses separator tricks", async () => {
+    const b = fakeBackend();
+    await expect(
+      dispatchTool("folder_rename", { path: "Clients/Sent/", new_path: "X" }, makeCtx(b)),
+    ).rejects.toThrow(/must not end with/);
+    await expect(
+      dispatchTool("folder_rename", { path: "Clients//Sent", new_path: "X" }, makeCtx(b)),
+    ).rejects.toThrow(/doubled/);
+    expect(b.renameFolder).not.toHaveBeenCalled();
+  });
+
+  it("folder_create rejects control characters before any IMAP call", async () => {
+    const b = fakeBackend();
+    await expect(
+      dispatchTool("folder_create", { path: "Receipts\r\nB1 DELETE Sent" }, makeCtx(b)),
+    ).rejects.toThrow(/control characters/);
+    expect(b.listFolders).not.toHaveBeenCalled();
+    expect(b.createFolder).not.toHaveBeenCalled();
   });
 
   it("folder_delete requires confirm", async () => {

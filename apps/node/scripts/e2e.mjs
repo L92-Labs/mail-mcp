@@ -119,7 +119,18 @@ async function main() {
 
     const tools = await client.listTools();
     const names = tools.tools.map((t) => t.name).sort();
-    check("lists 9 tools", names.length === 9, names);
+    check(
+      "lists 12 tools incl. folder management",
+      names.length === 12 &&
+        ["folder_create", "folder_rename", "folder_delete"].every((n) => names.includes(n)),
+      names,
+    );
+    const deleteTool = tools.tools.find((t) => t.name === "folder_delete");
+    check(
+      "folder_delete annotated destructive",
+      deleteTool?.annotations?.destructiveHint === true,
+      deleteTool?.annotations,
+    );
     const findTool = tools.tools.find((t) => t.name === "emails_find");
     check(
       "tool schemas are typed + described",
@@ -233,6 +244,50 @@ async function main() {
     const mod = await call("emails_modify", { email_ids: [lunch], mark_read: true, flag: true, move_to_folder: "trash" });
     const trash = await call("emails_find", { folder: "Trash" });
     check("move to trash alias", mod.moved_to === "Trash" && trash.total === 1 && trash.emails[0].isFlagged && !trash.emails[0].isUnread, { mod, trash: trash.emails[0] });
+
+    // Folder management: create (top-level + nested), rename, delete, guards
+    const folders0 = await call("folders_list");
+    const delim = folders0.folders.find((f) => f.delimiter)?.delimiter || "/";
+    check("folders_list exposes delimiter", folders0.folders.some((f) => typeof f.delimiter === "string" && f.delimiter !== ""), folders0.folders.slice(0, 5));
+
+    const created = await call("folder_create", { path: `INBOX${delim}Receipts` });
+    check("folder_create nested under INBOX", created.created === true && created.folder === `INBOX${delim}Receipts`, created);
+    const createdTop = await call("folder_create", { path: "E2E Top" });
+    check("folder_create top-level", createdTop.created === true, createdTop);
+    const afterCreate = await call("folders_list");
+    check("created folders listed", afterCreate.folders.some((f) => f.path === `INBOX${delim}Receipts`) && afterCreate.folders.some((f) => f.path === "E2E Top"), afterCreate.folders.map((f) => f.path));
+
+    const renamed = await call("folder_rename", { path: "E2E Top", new_path: "E2E Renamed" });
+    check("folder_rename", renamed.renamed === true && renamed.new_folder === "E2E Renamed", renamed);
+    const afterRename = await call("folders_list");
+    check("rename replaces the folder", afterRename.folders.some((f) => f.path === "E2E Renamed") && !afterRename.folders.some((f) => f.path === "E2E Top"), afterRename.folders.map((f) => f.path));
+
+    const noConfirm = await call("folder_delete", { path: "E2E Renamed" });
+    check("folder_delete without confirm refused before IMAP", typeof noConfirm.__error === "string" && noConfirm.__error.includes("confirm"), noConfirm);
+    const delInbox = await call("folder_delete", { path: "INBOX", confirm: true });
+    check("INBOX delete refused", typeof delInbox.__error === "string" && delInbox.__error.includes("INBOX"), delInbox);
+    const renameInbox = await call("folder_rename", { path: "inbox", new_path: "NewInbox" });
+    check("INBOX rename refused (case-insensitive)", typeof renameInbox.__error === "string" && renameInbox.__error.includes("INBOX"), renameInbox);
+
+    const delTop = await call("folder_delete", { path: "E2E Renamed", confirm: true });
+    check("folder_delete removes the folder", delTop.deleted === true, delTop);
+    const delNested = await call("folder_delete", { path: `INBOX${delim}Receipts`, confirm: true });
+    check("folder_delete nested", delNested.deleted === true, delNested);
+    const afterDelete = await call("folders_list");
+    check("deleted folders gone", !afterDelete.folders.some((f) => f.path === "E2E Renamed" || f.path === `INBOX${delim}Receipts`), afterDelete.folders.map((f) => f.path));
+
+    // Guards against a real server: duplicates, name-resolved specials, aliasing, control chars
+    const dup = await call("folder_create", { path: "Receipts" });
+    const dup2 = await call("folder_create", { path: "Receipts" });
+    check("folder_create duplicate reports created:false", dup.created === true && dup2.created === false, { dup, dup2 });
+    await call("folder_delete", { path: "Receipts", confirm: true });
+
+    const delSentName = await call("folder_delete", { path: "Sent", confirm: true });
+    check("name-resolved Sent protected without special-use attrs", typeof delSentName.__error === "string" && delSentName.__error.includes("special folder"), delSentName);
+    const delSentSlash = await call("folder_delete", { path: `Sent${delim}`, confirm: true });
+    check("trailing-delimiter aliasing refused", typeof delSentSlash.__error === "string" && delSentSlash.__error.includes("must not end with"), delSentSlash);
+    const crlf = await call("folder_create", { path: "Receipts\r\nB1 DELETE Sent" });
+    check("control characters refused before IMAP", typeof crlf.__error === "string" && crlf.__error.includes("control characters"), crlf);
 
     // Events: stateless watermark
     const seed = await call("emails_events", {});

@@ -110,7 +110,7 @@ export function shouldSaveSent(config: RuntimeConfig, account: EmailAccount): bo
 
 export type SpecialFolder = "sent" | "drafts" | "trash" | "archive" | "junk";
 
-const SPECIAL_USE: Record<SpecialFolder, string> = {
+export const SPECIAL_USE: Record<SpecialFolder, string> = {
   sent: "\\Sent",
   drafts: "\\Drafts",
   trash: "\\Trash",

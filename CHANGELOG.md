@@ -6,8 +6,17 @@
   work on both runtimes (Node/imapflow and Workers/cf-imap).
 - `folder_delete` requires `confirm: true`; INBOX, special-use folders and
   parents containing them are always refused.
-- `folders_list` now reports each folder's hierarchy delimiter for building
-  nested paths.
+- Hardened guards (review findings): folder paths with control characters are
+  rejected before any IMAP command is built; separator aliasing (trailing and
+  doubled delimiters) fails closed; rename destinations are guarded like
+  sources; INBOX and special folders cannot be created either; configured
+  `sent_folder`/`drafts_folder` and name-resolved specials are protected even
+  when the server omits special-use attributes.
+- `folders_list` cache is invalidated by folder mutations (generation now part
+  of the cache key), and `folders_list` reports each folder's hierarchy
+  delimiter for building nested paths.
+- Duplicate `folder_create` returns `created: false` consistently on both
+  runtimes (ALREADYEXISTS / "already exists" detection).
 
 ## 0.2.0 — 2026-10-19
 
