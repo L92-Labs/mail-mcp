@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseLsubName } from "../apps/worker/src/lsub.js";
+import { parseLsubName, resolveStoredName } from "../apps/worker/src/lsub.js";
 
 // Worker-runtime module (cf-imap has no folder-management API), so the LSUB
 // line parser is pinned here against the cases GLM pass-12 enumerated.
@@ -41,5 +41,33 @@ describe("parseLsubName", () => {
     // Regression pin (pass-15 LOW): a literal body on a non-LSUB line must
     // not be adopted as a subscribed path.
     expect(parseLsubName("* STATUS () NIL {7}", new TextEncoder().encode("Archive"))).toBeNull();
+  });
+});
+
+describe("resolveStoredName", () => {
+  const listing = [
+    { name: "INBOX", delimiter: "." },
+    { name: "INBOX.Work", delimiter: "." },
+    { name: "INBOX.Work/Foo", delimiter: "/" },
+    { name: "Archive", delimiter: "/" },
+  ];
+
+  it("exact match wins", () => {
+    expect(resolveStoredName(listing, "Archive")).toBe("Archive");
+    expect(resolveStoredName(listing, "INBOX.Work")).toBe("INBOX.Work");
+  });
+
+  it("case-insensitive match second", () => {
+    expect(resolveStoredName(listing, "archive")).toBe("Archive");
+    expect(resolveStoredName(listing, "inbox.work")).toBe("INBOX.Work");
+  });
+
+  it("delimiter-aware suffix match resolves prefixed stored names", () => {
+    expect(resolveStoredName(listing, "Work")).toBe("INBOX.Work");
+    expect(resolveStoredName(listing, "Work/Foo")).toBe("INBOX.Work/Foo");
+  });
+
+  it("no match returns the wanted name", () => {
+    expect(resolveStoredName(listing, "Nope")).toBe("Nope");
   });
 });

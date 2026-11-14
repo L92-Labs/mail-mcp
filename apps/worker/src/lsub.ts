@@ -25,3 +25,29 @@ export function parseLsubName(line: string, literal: Uint8Array | null | undefin
   }
   return mailbox;
 }
+
+/**
+ * Resolve the server-stored name for a created/renamed folder from a listing:
+ * exact match, then case-insensitive, then suffix match at a delimiter
+ * boundary (namespace prefixes like "INBOX." store prefixed names for
+ * unprefixed arguments; the boundary may also be the child's own separator,
+ * e.g. "Work/Foo" stored as "INBOX.Work/Foo"). Returns `wanted` when nothing
+ * matches (caller treats it as server truth).
+ */
+export function resolveStoredName(
+  after: Array<{ name: string; delimiter?: string }>,
+  wanted: string,
+): string {
+  const lower = wanted.toLowerCase();
+  const exact = after.find((f) => f.name === wanted);
+  if (exact) return exact.name;
+  const ci = after.find((f) => f.name.toLowerCase() === lower);
+  if (ci) return ci.name;
+  const prefixed = after.find((f) => {
+    const name = f.name.toLowerCase();
+    if (!name.endsWith(lower)) return false;
+    const boundary = name.charAt(name.length - lower.length - 1);
+    return boundary === f.delimiter?.toLowerCase() || boundary === "/" || boundary === ".";
+  });
+  return prefixed?.name ?? wanted;
+}

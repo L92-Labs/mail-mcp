@@ -1,5 +1,5 @@
 import { CFImap, type Email as CfEmail, type SearchEmailsProps, type ResponseItem } from "cf-imap";
-import { parseLsubName } from "./lsub.js";
+import { parseLsubName, resolveStoredName } from "./lsub.js";
 import { Email as MimeEmail, WorkerMailer } from "worker-mailer";
 import {
   isDescendantFolder,
@@ -418,31 +418,35 @@ export function createWorkerBackend(): MailBackend {
       return withImap(account, async (client) => {
         const c = internals(client);
         const name = quoteMailbox(c.encodeMailboxName(path));
+        let created: boolean;
         try {
           await mailboxCommand(client, `CREATE ${name}`);
+          created = true;
         } catch (error) {
-          if (isAlreadyExists(error)) return { path, created: false };
-          throw error;
+          if (!isAlreadyExists(error)) throw error;
+          created = false;
         }
         // Resolve the server-stored path (namespace prefix / case may differ
         // from the raw argument) so cursor keys and results use server truth.
         let stored = path;
         try {
           const after = await client.getFolders("", "*");
-          const hit =
-            after.find((f) => f.name === stored) ??
-            after.find((f) => f.name.toLowerCase() === stored.toLowerCase());
-          if (hit) stored = hit.name;
+          stored = resolveStoredName(after, path);
         } catch {
           // best-effort
         }
-        // Subscribe so the folder shows up for clients listing subscribed mailboxes only.
-        try {
-          await mailboxCommand(client, `SUBSCRIBE ${quoteMailbox(c.encodeMailboxName(stored))}`);
-        } catch {
-          // best-effort
+        if (created) {
+          // Subscribe so the folder shows up for clients listing subscribed mailboxes only.
+          try {
+            await mailboxCommand(
+              client,
+              `SUBSCRIBE ${quoteMailbox(c.encodeMailboxName(stored))}`,
+            );
+          } catch {
+            // best-effort
+          }
         }
-        return { path: stored, created: true };
+        return { path: stored, created };
       });
     },
 
@@ -463,6 +467,9 @@ export function createWorkerBackend(): MailBackend {
         } catch {
           // best-effort
         }
+        // The server-stored source path (namespace prefix / case may differ
+        // from the raw argument) anchors the child mapping.
+        const sourceRoot = resolveStoredName(folders, path);
         // Migrate exactly the children the server reports as subscribed. LSUB
         // is the source of truth when plain LIST carries no \Subscribed
         // attributes (most servers); without any signal, every mailbox is
@@ -480,25 +487,20 @@ export function createWorkerBackend(): MailBackend {
         const oldChildren = folders
           .filter(
             (f) =>
-              isDescendantFolder(f.path, path, folders) &&
+              isDescendantFolder(f.path, sourceRoot, folders) &&
               (reportsState
                 ? f.subscribed === true
                 : subscribedSet === null || subscribedSet.has(f.path)),
           )
           .map((f) => f.path);
-        const oldName = quoteMailbox(c.encodeMailboxName(path));
-        const newName = quoteMailbox(c.encodeMailboxName(newPath));
-        await mailboxCommand(client, `RENAME ${oldName} ${newName}`);
+        await mailboxCommand(client, `RENAME ${quoteMailbox(c.encodeMailboxName(path))} ${quoteMailbox(c.encodeMailboxName(newPath))}`);
         // Resolve the server-stored destination path (namespace prefix / case
         // may differ from the raw argument) so cursor keys and results use
         // server truth.
         let canonical = newPath;
         try {
           const after = await client.getFolders("", "*");
-          const hit =
-            after.find((f) => f.name === canonical) ??
-            after.find((f) => f.name.toLowerCase() === canonical.toLowerCase());
-          if (hit) canonical = hit.name;
+          canonical = resolveStoredName(after, newPath);
         } catch {
           // best-effort
         }
@@ -507,20 +509,22 @@ export function createWorkerBackend(): MailBackend {
         // subscribed nowhere for subscribed-only clients.
         try {
           await mailboxCommand(client, `SUBSCRIBE ${quoteMailbox(c.encodeMailboxName(canonical))}`);
-          await mailboxCommand(client, `UNSUBSCRIBE ${oldName}`);
+          await mailboxCommand(client, `UNSUBSCRIBE ${quoteMailbox(c.encodeMailboxName(sourceRoot))}`);
         } catch {
           // best-effort
         }
         for (const child of oldChildren) {
           try {
-            const newChild = quoteMailbox(c.encodeMailboxName(`${canonical}${child.slice(path.length)}`));
+            const newChild = quoteMailbox(
+              c.encodeMailboxName(`${canonical}${child.slice(sourceRoot.length)}`),
+            );
             await mailboxCommand(client, `SUBSCRIBE ${newChild}`);
             await mailboxCommand(client, `UNSUBSCRIBE ${quoteMailbox(c.encodeMailboxName(child))}`);
           } catch {
             // best-effort
           }
         }
-        return { path, newPath: canonical };
+        return { path: sourceRoot, newPath: canonical };
       });
     },
 
