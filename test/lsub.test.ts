@@ -82,6 +82,24 @@ describe("resolveStoredName", () => {
     expect(resolveStoredName(listing, "2026")).toBe("2026");
   });
 
+  it("INBOX.X on a flat namespace is an independent mailbox (no convention)", () => {
+    // Codex P1 (round 6.5t2): flat namespace — "INBOX.Receipts" is a literal
+    // name; folder_delete Receipts must not delete INBOX.Receipts.
+    const flat = [
+      { name: "Receipts", path: "Receipts", delimiter: "" },
+      { name: "INBOX.Receipts", path: "INBOX.Receipts", delimiter: "" },
+    ];
+    expect(resolveStoredName(flat, "Receipts")).toBe("Receipts");
+    expect(resolveStoredName(flat, "receipts")).toBe("receipts");
+  });
+
+  it("INBOX.X on a slash-delimiter hierarchical server resolves (convention)", () => {
+    const slash = [
+      { name: "Sent", path: "INBOX/Sent", delimiter: "/" },
+    ];
+    expect(resolveStoredName(slash, "Sent")).toBe("INBOX/Sent");
+  });
+
   it("no match returns the wanted name", () => {
     expect(resolveStoredName(listing, "Nope")).toBe("Nope");
   });

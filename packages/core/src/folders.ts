@@ -120,11 +120,16 @@ export function resolveStoredName(
   // server's own delimiter). Anything else — e.g. unrelated "Reports.2026"
   // for wanted "2026" — must NOT resolve, or destructive operations would
   // act on an unrelated mailbox.
+  // Applies only on hierarchical namespaces — "INBOX" + delimiter + wanted
+  // (INBOX token case-insensitive, delimiter and remainder exact). On flat
+  // namespaces ("") or unreported ones, "INBOX.X" is an independent mailbox
+  // and must not resolve: destructive operations act on the raw name and
+  // the server errors harmlessly.
   const inboxPrefixed = after.find((f) => {
+    const delim = f.delimiter;
+    if (!delim) return false;
     const p = pathOf(f);
-    if (!p.toLowerCase().startsWith("inbox") || p.length <= 5) return false;
-    const rest = p.slice(5);
-    return (rest[0] === "." || rest[0] === "/") && rest.slice(1) === wanted;
+    return p.slice(0, 5).toLowerCase() === "inbox" && p.slice(5) === delim + wanted;
   });
   if (inboxPrefixed) return pathOf(inboxPrefixed);
   return wanted;
