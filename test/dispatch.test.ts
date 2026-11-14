@@ -386,6 +386,26 @@ describe("folder management", () => {
     expect(deleted2).toEqual([]);
   });
 
+  it("folder_create resets both spellings on prefixed servers", async () => {
+    const b = fakeBackend();
+    const ctx = makeCtx(b);
+    const deleted: string[] = [];
+    ctx.cursors = {
+      get: async () => null,
+      set: async () => {},
+      delete: async (key: string) => {
+        deleted.push(key);
+      },
+    };
+    // Prefixed server: backend returns the canonical stored path.
+    vi.mocked(b.createFolder).mockResolvedValueOnce({ path: "INBOX.Receipts", created: true });
+    await dispatchTool("folder_create", { path: "Receipts" }, ctx);
+    expect(deleted).toEqual([
+      "events:uid:default:INBOX.Receipts",
+      "events:uid:default:Receipts",
+    ]);
+  });
+
   it("folder_rename never touches dot-suffixed lookalikes on known-delimiter servers", async () => {
     // Slash-delimiter server (GreenMail, Cyrus, most hosted IMAP): a folder
     // named "Archive/Work.2024" is unrelated to "Work" and must keep its cursor.
@@ -600,6 +620,25 @@ describe("folder management", () => {
     expect(deleted).toEqual(["events:uid:default:Receipts"]);
   });
 
+  it("folder_delete drops both spellings of the deleted folder's cursor", async () => {
+    const b = fakeBackend();
+    const ctx = makeCtx(b);
+    const deleted: string[] = [];
+    ctx.cursors = {
+      get: async () => null,
+      set: async () => {},
+      delete: async (key: string) => {
+        deleted.push(key);
+      },
+    };
+    // Prefixed backend reports the canonical stored path; raw arg differs.
+    vi.mocked(b.deleteFolder).mockResolvedValueOnce({ path: "INBOX.Old" });
+    await dispatchTool("folder_delete", { path: "Old", confirm: true }, ctx);
+    expect(deleted).toEqual(
+      expect.arrayContaining(["events:uid:default:INBOX.Old", "events:uid:default:Old"]),
+    );
+  });
+
   it("folder_rename migrates the event cursor to the new path", async () => {
     const b = fakeBackend({
       renameFolder: vi.fn(async () => ({ path: "Receipts", newPath: "Finance/Receipts" })),
@@ -623,6 +662,34 @@ describe("folder management", () => {
     await dispatchTool("folder_rename", { path: "Receipts", new_path: "Finance/Receipts" }, ctx);
     expect(sets.get("events:uid:default:Finance/Receipts")).toBe("100");
     expect(deleted).toEqual(["events:uid:default:Receipts"]);
+  });
+
+  it("folder_rename migrates cursors across a namespace alias", async () => {
+    // Courier-style INBOX. prefix: the caller passes the unprefixed alias
+    // (Work); the listing and backend speak canonical paths (INBOX.Work).
+    const b = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "INBOX.Work", newPath: "INBOX.Archive/Work" })),
+      listFolders: vi.fn(async () => [
+        { name: "Work", path: "INBOX.Work", delimiter: "." },
+        { name: "Foo", path: "INBOX.Work/Foo", delimiter: "." },
+      ]),
+    });
+    const ctx = makeCtx(b);
+    const sets = new Map<string, string>();
+    const deleted: string[] = [];
+    ctx.cursors = {
+      get: async (key: string) => (key === "events:uid:default:INBOX.Work" ? "100" : null),
+      set: async (key: string, value: string) => {
+        sets.set(key, value);
+      },
+      delete: async (key: string) => {
+        deleted.push(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work" }, ctx);
+    expect(sets.get("events:uid:default:INBOX.Archive/Work")).toBe("100");
+    expect(deleted).toEqual(expect.arrayContaining(["events:uid:default:INBOX.Work"]));
+    expect(sets.has("events:uid:default:Archive/Work")).toBe(false);
   });
 
   it("folder_rename migrates descendant cursors and drops stale destination cursors", async () => {

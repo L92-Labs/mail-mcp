@@ -402,8 +402,14 @@ export async function dispatchTool(
       if (result.created) {
         // A recreated folder may reuse a path whose old poll cursor exceeds its
         // new UIDs; drop it so the next poll re-seeds at the current watermark.
+        // Both spellings (canonical result and raw argument) are cleaned up.
         try {
-          await ctx.cursors.delete?.(eventCursorKey(account.name, result.path));
+          for (const key of new Set([
+            eventCursorKey(account.name, result.path),
+            eventCursorKey(account.name, path),
+          ])) {
+            await ctx.cursors.delete?.(key);
+          }
         } catch {
           // best-effort
         }
@@ -483,7 +489,12 @@ export async function dispatchTool(
       // Drop the poll cursor so a later recreation of this path re-seeds at
       // the current watermark instead of hiding mail below the old one.
       try {
-        await ctx.cursors.delete?.(eventCursorKey(account.name, result.path));
+        for (const key of new Set([
+          eventCursorKey(account.name, result.path),
+          eventCursorKey(account.name, path),
+        ])) {
+          await ctx.cursors.delete?.(key);
+        }
       } catch {
         // best-effort
       }
