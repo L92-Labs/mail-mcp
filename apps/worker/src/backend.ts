@@ -455,9 +455,17 @@ export function createWorkerBackend(): MailBackend {
         const c = internals(client);
         // Children follow the rename, but subscriptions do not (RFC 3501 §6.3.6):
         // capture descendants before, resubscribe at the new paths after.
+        let storedNames: Array<{ name: string; delimiter?: string }> = [];
         let folders: FolderInfo[] = [];
         try {
-          folders = (await client.getFolders("", "*")).map((f) => ({
+          const raw = await client.getFolders("", "*");
+          // Full stored paths feed sourceRoot resolution; the remapped FolderInfo
+          // entries feed the descendant filter and subscription migration.
+          storedNames = raw.map((f) => ({
+            name: f.name,
+            delimiter: f.delimiter || undefined,
+          }));
+          folders = raw.map((f) => ({
             name: f.name.split(f.delimiter || "/").pop() || f.name,
             path: f.name,
             delimiter: f.delimiter || undefined,
@@ -469,7 +477,7 @@ export function createWorkerBackend(): MailBackend {
         }
         // The server-stored source path (namespace prefix / case may differ
         // from the raw argument) anchors the child mapping.
-        const sourceRoot = resolveStoredName(folders, path);
+        const sourceRoot = resolveStoredName(storedNames, path);
         // Migrate exactly the children the server reports as subscribed. LSUB
         // is the source of truth when plain LIST carries no \Subscribed
         // attributes (most servers); without any signal, every mailbox is
