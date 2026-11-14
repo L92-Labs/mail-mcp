@@ -19,7 +19,7 @@ import { createNodeBackend } from "./backend.js";
 const MAX_REQUEST_BYTES = Number(process.env.MAX_REQUEST_BYTES ?? "") || 32 * 1024 * 1024;
 
 export function buildMcpServer(ctx: DispatchContext): McpServer {
-  const server = new McpServer({ name: "mail-mcp", version: "0.2.0" });
+  const server = new McpServer({ name: "mail-mcp", version: "0.3.0" });
   for (const tool of enabledToolMeta(ctx.config)) {
     server.registerTool(
       tool.name,
