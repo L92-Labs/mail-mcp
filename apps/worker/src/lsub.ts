@@ -13,8 +13,9 @@
 export function parseLsubName(line: string, literal: Uint8Array | null | undefined): string | null {
   if (!line.startsWith("* LSUB")) return null;
   if (literal != null) {
-    const decoded = new TextDecoder().decode(literal).trim();
-    return decoded || null;
+    // Names may legitimately end in whitespace — decode without trimming.
+    const decoded = new TextDecoder().decode(literal);
+    return decoded.length ? decoded : null;
   }
   const m = /^\* LSUB \([^)]*\) (?:"((?:[^"\\]|\\.)*)"|NIL|\S+) (.+)$/.exec(line);
   if (!m) return null;

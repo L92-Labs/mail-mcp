@@ -42,6 +42,42 @@ function separatorsFor(path: string, folders: FolderInfo[]): string[] {
 }
 
 /**
+ * True when `normalized` lands on the protected folder: exact/case-insensitive
+ * equality, or the protected path ends with <delimiter><normalized> — servers
+ * with namespace prefixes (Courier "INBOX.") store prefixed names for
+ * unprefixed arguments, and backend normalization then acts on the protected
+ * folder even though the raw strings differ.
+ */
+function landsOnProtected(
+  normalized: string,
+  protectedPath: string,
+  folders: FolderInfo[],
+): boolean {
+  const nLower = normalized.toLowerCase();
+  const pLower = protectedPath.toLowerCase();
+  if (nLower === pLower) return true;
+  const delim = folders.find((f) => f.path === protectedPath)?.delimiter;
+  const seps = delim ? [delim] : ["/", "."];
+  return seps.some((d) => pLower.endsWith(`${d}${nLower}`));
+}
+
+/** True when renaming/deleting `normalized` would drag the protected folder along. */
+function dragsProtected(
+  normalized: string,
+  protectedPath: string,
+  folders: FolderInfo[],
+): boolean {
+  const nLower = normalized.toLowerCase();
+  const pLower = protectedPath.toLowerCase();
+  const delim = folders.find((f) => f.path === protectedPath)?.delimiter;
+  const esc = nLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // normalized is a delimiter-bounded middle segment of the protected path
+  // (the trailing delimiter covers the leaf-at-end case).
+  const middle = new RegExp(`[./]${esc}[./]`);
+  return middle.test(`${pLower}${delim ?? "/"}`);
+}
+
+/**
  * True when `path` is a strict descendant of `parent`, using the child's own
  * delimiter when the listing provides one, else the shared delimiter, else
  * both common separators when the server reports none. Exact (case-sensitive)
@@ -106,7 +142,7 @@ export function assertFolderManageable(
     if (!protectedPaths.has(p.path)) protectedPaths.set(p.path, p.use);
   }
   for (const [protectedPath, use] of protectedPaths) {
-    if (protectedPath.toLowerCase() === normalized.toLowerCase()) {
+    if (landsOnProtected(normalized, protectedPath, folders)) {
       throw new Error(
         `cannot ${action} "${protectedPath}" (${use} folder); special folders must stay`,
       );
@@ -114,6 +150,11 @@ export function assertFolderManageable(
     if (isParentOf(normalized, protectedPath, folders)) {
       throw new Error(
         `cannot ${action} "${normalized}": it contains the special folder "${protectedPath}" (${use})`,
+      );
+    }
+    if (dragsProtected(normalized, protectedPath, folders)) {
+      throw new Error(
+        `cannot ${action} "${normalized}": the server would move the special folder "${protectedPath}" (${use}) with it`,
       );
     }
   }
@@ -135,7 +176,7 @@ export function findProtectedFolder(
     if (!protectedPaths.has(p.path)) protectedPaths.set(p.path, p.use);
   }
   for (const [protectedPath, use] of protectedPaths) {
-    if (protectedPath.toLowerCase() === normalized.toLowerCase()) {
+    if (landsOnProtected(normalized, protectedPath, folders)) {
       return { path: protectedPath, use };
     }
   }

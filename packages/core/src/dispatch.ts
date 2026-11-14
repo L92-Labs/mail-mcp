@@ -374,7 +374,9 @@ export async function dispatchTool(
       if (isInboxPath(path)) {
         throw new Error('INBOX already exists; create a subfolder instead, e.g. "INBOX/…"');
       }
-      const folders = await listFolders(ctx, account);
+      // Destructive/guard decisions need current server state: bypass the
+      // cache (another client may have changed special-use structure).
+      const folders = await ctx.backend.listFolders(account);
       // Same aliasing refusal as rename/delete: a server-dependent trailing
       // separator could create a path this tool could never manage again.
       rejectSeparatorTricks(path, folders);
@@ -403,8 +405,9 @@ export async function dispatchTool(
       const parsed = folderRenameSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
       assertNotInbox(parsed.path, "rename");
-      // Pre-rename snapshot: guards AND the set of folders the rename moves.
-      const folders = await listFolders(ctx, account);
+      // Pre-rename snapshot, uncached: guards AND the set of folders the
+      // rename moves must reflect current server state.
+      const folders = await ctx.backend.listFolders(account);
       const path = assertFolderManageable(parsed.path, folders, "rename", protectedFolders(account, folders));
       const sourceFolders = folders.filter(
         (f) => f.path === path || isDescendantFolder(f.path, path, folders),
@@ -451,7 +454,7 @@ export async function dispatchTool(
         throw new Error('folder_delete requires confirm:true — deleting removes the folder and every message in it');
       }
       assertNotInbox(parsed.path, "delete");
-      const folders = await listFolders(ctx, account);
+      const folders = await ctx.backend.listFolders(account);
       const path = assertFolderManageable(parsed.path, folders, "delete", protectedFolders(account, folders));
       const result = await ctx.backend.deleteFolder(account, path);
       await bumpCache(ctx, account);

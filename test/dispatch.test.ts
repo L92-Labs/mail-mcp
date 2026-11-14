@@ -489,6 +489,32 @@ describe("folder management", () => {
     expect(cursors.get("events:uid:default:INBOX.Archive/Work/Foo")).toBe("12");
   });
 
+  it("guards refuse unprefixed tails of prefixed special folders", async () => {
+    // Courier-style INBOX. prefix: deleting or renaming the unprefixed tail
+    // ("Sent") lands on the canonical protected folder after the server
+    // normalizes the name — the guard must refuse it.
+    const b = fakeBackend({
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "." },
+        { name: "Sent", path: "INBOX.Sent", specialUse: "\\Sent", delimiter: "." },
+        { name: "Clients", path: "INBOX.Clients", delimiter: "." },
+        { name: "Sent", path: "INBOX.Clients/Sent", specialUse: "\\Sent", delimiter: "/" },
+      ]),
+    });
+    await expect(
+      dispatchTool("folder_delete", { path: "Sent", confirm: true }, makeCtx(b)),
+    ).rejects.toThrow(/\\Sent folder/);
+    await expect(
+      dispatchTool("folder_rename", { path: "Sent", new_path: "X" }, makeCtx(b)),
+    ).rejects.toThrow(/\\Sent folder/);
+    // The unprefixed parent whose canonical form contains a special child:
+    await expect(
+      dispatchTool("folder_rename", { path: "Clients", new_path: "Customers" }, makeCtx(b)),
+    ).rejects.toThrow(/special folder "INBOX\.Clients\/Sent"/);
+    expect(b.renameFolder).not.toHaveBeenCalled();
+    expect(b.deleteFolder).not.toHaveBeenCalled();
+  });
+
   it("folder_rename never corrupts case-variant lookalike cursors", async () => {
     // Renaming Old -> New where an unrelated lowercase "new/Notes" exists
     // (case-sensitive server): the case-variant folder keeps its live cursor
@@ -645,9 +671,9 @@ describe("folder management", () => {
     await dispatchTool("folders_list", {}, ctx);
     await dispatchTool("folders_list", {}, ctx);
     expect(b.listFolders).toHaveBeenCalledTimes(1);
-    await dispatchTool("folder_create", { path: "Receipts" }, ctx);
-    await dispatchTool("folders_list", {}, ctx);
-    expect(b.listFolders).toHaveBeenCalledTimes(2);
+    await dispatchTool("folder_create", { path: "Receipts" }, ctx); // uncached guard listing → 2
+    await dispatchTool("folders_list", {}, ctx); // generation bumped → fresh fetch → 3
+    expect(b.listFolders).toHaveBeenCalledTimes(3);
   });
 
   it("folder_rename renames a regular folder", async () => {
