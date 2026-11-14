@@ -79,4 +79,12 @@ describe("resolveStoredName", () => {
   it("no match returns the wanted name", () => {
     expect(resolveStoredName(listing, "Nope")).toBe("Nope");
   });
+
+  it("never resolves destructive lookalikes (namespace safety)", () => {
+    // Corruption pin (round 6.5n): unrelated Reports.2026 must not resolve
+    // for wanted 2026 — folder_delete would otherwise delete an unrelated
+    // mailbox. The INBOX-prefix convention only.
+    expect(resolveStoredName(listing, "2026")).toBe("2026");
+    expect(resolveStoredName(listing, "Sent")).toBe("Sent");
+  });
 });

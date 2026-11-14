@@ -116,13 +116,18 @@ export function resolveStoredName(
   // Namespace-prefix suffix: stored "INBOX.Work/Foo" for wanted "Work/Foo" —
   // the boundary may be the stored folder's own delimiter or either common
   // separator (prefix convention varies per server).
-  const prefixed = after.find((f) => {
-    const delim = f.delimiter;
+  // Namespace-prefix convention: personal mailboxes on prefixed servers are
+  // stored as "INBOX.<wanted>" (or "INBOX<delimiter><wanted>" with the
+  // server's own delimiter). Anything else — e.g. unrelated "Reports.2026"
+  // for wanted "2026" — must NOT resolve, or destructive operations would
+  // act on an unrelated mailbox.
+  const inboxPrefixed = after.find((f) => {
     const pathLower = pathOf(f).toLowerCase();
-    const seps = [delim, "/", "."].filter((s): s is string => Boolean(s));
-    return seps.some((s) => pathLower.endsWith(`${s.toLowerCase()}${lower}`));
+    if (pathLower === `inbox.${lower}`) return true;
+    const delim = f.delimiter?.toLowerCase();
+    return Boolean(delim) && pathLower === `inbox${delim}${lower}`;
   });
-  if (prefixed) return pathOf(prefixed);
+  if (inboxPrefixed) return pathOf(inboxPrefixed);
   return wanted;
 }
 
