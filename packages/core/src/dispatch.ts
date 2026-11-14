@@ -29,6 +29,7 @@ import {
   isInboxPath,
   normalizeFolderPath,
   rejectSeparatorTricks,
+  resolveStoredName,
   type ProtectedFolder,
 } from "./folders.js";
 import {
@@ -380,7 +381,11 @@ export async function dispatchTool(
       // Same aliasing refusal as rename/delete: a server-dependent trailing
       // separator could create a path this tool could never manage again.
       rejectSeparatorTricks(path, folders);
-      const special = findProtectedFolder(path, folders, protectedFolders(account, folders));
+      const special = findProtectedFolder(
+        resolveStoredName(folders, path),
+        folders,
+        protectedFolders(account, folders),
+      );
       if (special) {
         throw new Error(`"${special.path}" already exists as the ${special.use} special folder`);
       }
@@ -406,26 +411,30 @@ export async function dispatchTool(
       const account = resolveAccount(ctx.config, parsed.account_name);
       assertNotInbox(parsed.path, "rename");
       // Pre-rename snapshot, uncached: guards AND the set of folders the
-      // rename moves must reflect current server state.
+      // rename moves must reflect current server state. The source path
+      // resolves to its server-stored form first (namespace prefixes / case
+      // may differ from the raw argument) so guards and cursor keys use
+      // canonical paths throughout.
       const folders = await ctx.backend.listFolders(account);
-      const path = assertFolderManageable(parsed.path, folders, "rename", protectedFolders(account, folders));
+      const sourceRoot = resolveStoredName(folders, parsed.path);
+      assertFolderManageable(sourceRoot, folders, "rename", protectedFolders(account, folders));
       const sourceFolders = folders.filter(
-        (f) => f.path === path || isDescendantFolder(f.path, path, folders),
+        (f) => f.path === sourceRoot || isDescendantFolder(f.path, sourceRoot, folders),
       );
       const newPath = normalizeFolderPath(parsed.new_path);
-      if (newPath === path) {
+      if (newPath === sourceRoot) {
         throw new Error("new_path must differ from path");
       }
       // The destination becomes a parent on some servers; guard it like a source.
       assertFolderManageable(newPath, folders, "rename", protectedFolders(account, folders));
-      const result = await ctx.backend.renameFolder(account, path, newPath);
+      const result = await ctx.backend.renameFolder(account, sourceRoot, newPath);
       await bumpCache(ctx, account);
       // RENAME moves the mailbox — and its captured children — with their
       // UIDs: migrate poll cursors for exactly the folders that moved, so
       // unrelated destinations keep their own cursors.
       try {
         for (const f of sourceFolders) {
-          const suffix = f.path.slice(path.length);
+          const suffix = f.path.slice(sourceRoot.length);
           // Key bases come from the backend-canonical paths (servers with
           // namespace prefixes normalize RENAME args), not the caller's raw
           // input — the poller keys cursors by those canonical paths.
@@ -455,7 +464,12 @@ export async function dispatchTool(
       }
       assertNotInbox(parsed.path, "delete");
       const folders = await ctx.backend.listFolders(account);
-      const path = assertFolderManageable(parsed.path, folders, "delete", protectedFolders(account, folders));
+      const path = assertFolderManageable(
+        resolveStoredName(folders, parsed.path),
+        folders,
+        "delete",
+        protectedFolders(account, folders),
+      );
       const result = await ctx.backend.deleteFolder(account, path);
       await bumpCache(ctx, account);
       // Drop the poll cursor so a later recreation of this path re-seeds at

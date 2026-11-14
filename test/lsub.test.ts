@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseLsubName, resolveStoredName } from "../apps/worker/src/lsub.js";
+import { resolveStoredName } from "@mail-mcp/core";
+import { parseLsubName } from "../apps/worker/src/lsub.js";
 
 // Worker-runtime module (cf-imap has no folder-management API), so the LSUB
 // line parser is pinned here against the cases GLM pass-12 enumerated.

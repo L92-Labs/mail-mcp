@@ -1,9 +1,10 @@
 import { CFImap, type Email as CfEmail, type SearchEmailsProps, type ResponseItem } from "cf-imap";
-import { parseLsubName, resolveStoredName } from "./lsub.js";
+import { parseLsubName } from "./lsub.js";
 import { Email as MimeEmail, WorkerMailer } from "worker-mailer";
 import {
   isDescendantFolder,
   KNOWN_SPECIAL_USE,
+  resolveStoredName,
   extractAddress,
   htmlToText,
   makeEmailId,
