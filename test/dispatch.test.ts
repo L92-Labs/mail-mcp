@@ -447,6 +447,35 @@ describe("folder management", () => {
     expect(sets2.get("events:uid:default:Archive/Work.2024")).toBe("7");
   });
 
+  it("folder_rename never migrates case-variant lookalike cursors", async () => {
+    // Case-variant descendants are unrelated mailboxes (servers may be
+    // case-sensitive): their cursors must not be migrated or dropped.
+    const b2 = fakeBackend({
+      renameFolder: vi.fn(async () => ({ path: "Work", newPath: "Archive/Work" })),
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "Work", path: "Archive/Work", delimiter: "/" },
+        { name: "Notes", path: "new/Notes", delimiter: "/" },
+      ]),
+    });
+    const ctx2 = makeCtx(b2);
+    const sets2 = new Map<string, string>();
+    const deleted2: string[] = [];
+    ctx2.cursors = {
+      get: async (key: string) => (key === "events:uid:default:new/Notes" ? "7" : null),
+      set: async (key: string, value: string) => {
+        sets2.set(key, value);
+      },
+      delete: async (key: string) => {
+        deleted2.push(key);
+      },
+    };
+    await dispatchTool("folder_rename", { path: "Work", new_path: "Archive/Work" }, ctx2);
+    expect(sets2.get("events:uid:default:Archive/Work")).toBeUndefined();
+    expect(deleted2).not.toContain("events:uid:default:new/Notes");
+    expect(sets2.get("events:uid:default:new/Notes")).toBeUndefined();
+  });
+
   it("folder_delete drops the event cursor of the deleted path", async () => {
     const b = fakeBackend();
     const ctx = makeCtx(b);
