@@ -63,6 +63,8 @@ function landsOnProtected(
   const pLower = protectedPath.toLowerCase();
   if (nLower === pLower) return true;
   const delim = folders.find((f) => f.path === protectedPath)?.delimiter;
+  // Explicitly flat namespace ("" / NIL): names are atomic — only equality.
+  if (delim !== undefined && delim === "") return false;
   const seps = delim ? [delim] : ["/", "."];
   return seps.some((d) => pLower.endsWith(`${d}${nLower}`));
 }
@@ -76,6 +78,9 @@ function dragsProtected(
   const nLower = normalized.toLowerCase();
   const pLower = protectedPath.toLowerCase();
   const delim = folders.find((f) => f.path === protectedPath)?.delimiter;
+  // Explicitly flat namespace ("" / NIL): no hierarchy — renaming or
+  // deleting the parent never moves an unrelated same-prefix mailbox.
+  if (delim !== undefined && delim === "") return false;
   const esc = nLower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   // normalized is a delimiter-bounded middle segment of the protected path
   // (the trailing delimiter covers the leaf-at-end case).

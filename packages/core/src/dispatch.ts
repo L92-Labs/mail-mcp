@@ -442,30 +442,35 @@ export async function dispatchTool(
       // UIDs: migrate poll cursors for exactly the folders that moved, so
       // unrelated destinations keep their own cursors.
       try {
+        // An unrelated literal folder at a raw spelling owns its own cursor:
+        // never clobber or delete it (literal-wins, like resolveMoveTarget).
+        // Full-path match only: a folder whose LEAF name equals the path is
+        // not a literal folder (namespace-alias fixtures use leaf names) —
+        // matching on name would exclude the raw-alias cursor keys.
+        const literalAt = (p: string): boolean =>
+          folders.some((f) => f.path === p);
         for (const f of sourceFolders) {
           const suffix = f.path.slice(sourceRoot.length);
-          // The poller keys cursors by whatever folder string the caller
-          // passed to emails_events — the canonical listing path, the raw
-          // (unprefixed) argument, and after the rename the destination's
-          // canonical or raw spelling. Seed/clean every plausible spelling;
-          // the highest watermark wins.
           const newKeys = [
             ...new Set([
               eventCursorKey(account.name, result.newPath + suffix),
-              eventCursorKey(account.name, newPath + suffix),
+              ...(literalAt(newPath + suffix) ? [] : [eventCursorKey(account.name, newPath + suffix)]),
             ]),
           ];
           const oldKeys = [
             ...new Set([
               eventCursorKey(account.name, f.path),
-              eventCursorKey(account.name, parsed.path + suffix),
+              ...(literalAt(parsed.path + suffix) ? [] : [eventCursorKey(account.name, parsed.path + suffix)]),
             ]),
           ];
-          const storedValues = (
+              const storedValues = (
             await Promise.all(oldKeys.map(async (k) => ctx.cursors.get(k)))
-          ).filter((v): v is string => v !== null);
+          )
+            .filter((v): v is string => v !== null)
+            .map((v) => Number(v))
+            .filter(Number.isFinite);
           if (storedValues.length) {
-            const watermark = String(Math.max(...storedValues.map((v) => Number(v))));
+            const watermark = String(Math.max(...storedValues));
             for (const k of newKeys) await ctx.cursors.set(k, watermark);
             for (const k of oldKeys) await ctx.cursors.delete?.(k);
           } else {

@@ -594,6 +594,8 @@ describe("folder management", () => {
       },
     };
     await dispatchTool("folder_rename", { path: "Old", new_path: "New" }, ctx2);
+    console.log("DEBUG sets2:", JSON.stringify([...sets2.keys()]));
+    console.log("DEBUG deleted2:", JSON.stringify(deleted2));
     // Positive control + exactness: the only cursor write is the true child's
     // migration; deletions cover the old child key and destination hygiene
     // (the renamed folder itself), never the lookalike.
