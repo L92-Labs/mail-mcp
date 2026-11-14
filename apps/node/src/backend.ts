@@ -10,6 +10,7 @@ import nodemailer from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import type Mail from "nodemailer/lib/mailer/index.js";
 import {
+  isDescendantFolder,
   KNOWN_SPECIAL_USE,
   formatAddress,
   htmlToText,
@@ -183,6 +184,13 @@ function normalizeSpecialUse(value?: string): string | undefined {
   return KNOWN_SPECIAL_USE.has(v) ? v : undefined;
 }
 
+/** Servers signal duplicate CREATE with an [ALREADYEXISTS] code or plain text. */
+function isAlreadyExists(error: unknown): boolean {
+  const e = error as { response?: string; responseText?: string; message?: string };
+  const text = `${e?.response ?? ""} ${e?.responseText ?? ""} ${e?.message ?? ""}`;
+  return /\bALREADYEXISTS\b|already exists/i.test(text);
+}
+
 function toMailOptions(msg: OutgoingMessage): Mail.Options {
   return {
     from: msg.from.name ? { name: msg.from.name, address: msg.from.address } : msg.from.address,
@@ -224,6 +232,8 @@ export function createNodeBackend(): MailBackend {
             name: b.name,
             path: b.path,
             specialUse: normalizeSpecialUse(b.specialUse),
+            delimiter: b.delimiter ?? "", // "" = NIL (explicitly flat)
+            subscribed: b.subscribed,
           }),
         );
       });
@@ -401,6 +411,92 @@ export function createNodeBackend(): MailBackend {
       return withImap(account, async (client) => {
         const status = await client.status(folder, { uidNext: true });
         return Math.max(0, (status.uidNext ?? 1) - 1);
+      });
+    },
+
+    async createFolder(account, path) {
+      return withImap(account, async (client) => {
+        let res;
+        try {
+          res = await client.mailboxCreate(path);
+        } catch (error) {
+          if (isAlreadyExists(error)) return { path, created: false };
+          // imapflow's CREATE handler also SUBSCRIBEs internally: a successful
+          // create followed by a refused subscribe throws although the folder
+          // exists. Probe before reporting failure so the result stays truthful.
+          try {
+            await client.mailboxOpen(path);
+            // The folder exists, but from an ambiguous error we cannot prove
+            // this call created it; report created:false so callers never
+            // wipe live state (e.g. the event poll cursor) on uncertain
+            // evidence. A retry reports created:false again, harmlessly.
+            return { path, created: false };
+          } catch {
+            throw error;
+          }
+        }
+        // imapflow subscribes on create; keep the result shape backend-agnostic.
+        return { path: res?.path ?? path, created: res?.created !== false };
+      });
+    },
+
+    async renameFolder(account, path, newPath) {
+      return withImap(account, async (client) => {
+        // Children follow the rename, but subscriptions do not (RFC 3501 §6.3.6
+        // SUBSCRIBE is per-mailbox, not hierarchical): capture descendants
+        // before, resubscribe at the new paths after — all best-effort.
+        let folders: FolderInfo[] = [];
+        try {
+          folders = (await client.list()).map((b) => ({
+            name: b.name,
+            path: b.path,
+            delimiter: b.delimiter ?? "", // "" = NIL (explicitly flat)
+            subscribed: b.subscribed,
+          }));
+        } catch {
+          // best-effort
+        }
+        // Migrate exactly the children the server reports as subscribed; when
+        // the listing reports no subscription state at all, every mailbox is
+        // assumed subscribed (RFC 3501) and all children migrate.
+        const reportsState = folders.some((f) => f.subscribed !== undefined);
+        const oldChildren = folders
+          .filter(
+            (f) =>
+              isDescendantFolder(f.path, path, folders) &&
+              (reportsState ? f.subscribed === true : true),
+          )
+          .map((f) => f.path);
+        const res = await client.mailboxRename(path, newPath);
+        const canonical = res?.newPath ?? newPath;
+        try {
+          const subscribed = await client.mailboxSubscribe(canonical);
+          if (subscribed !== false) await client.mailboxUnsubscribe(path);
+        } catch {
+          // best-effort
+        }
+        for (const child of oldChildren) {
+          try {
+            const ok = await client.mailboxSubscribe(`${canonical}${child.slice(path.length)}`);
+            if (ok !== false) await client.mailboxUnsubscribe(child);
+          } catch {
+            // best-effort
+          }
+        }
+        return { path: res?.path ?? path, newPath: canonical };
+      });
+    },
+
+    async deleteFolder(account, path) {
+      return withImap(account, async (client) => {
+        const res = await client.mailboxDelete(path);
+        // Some servers keep the subscription after DELETE; drop it best-effort.
+        try {
+          await client.mailboxUnsubscribe(path);
+        } catch {
+          // ignore
+        }
+        return { path: res?.path ?? path };
       });
     },
   };

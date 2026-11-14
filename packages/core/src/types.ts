@@ -58,6 +58,12 @@ export type FolderInfo = {
   path: string;
   /** Normalized RFC 6154 attribute, e.g. "\\Sent", "\\Drafts", "\\Trash". */
   specialUse?: string;
+  /** Hierarchy separator, e.g. "/" or ".". "" = explicitly flat namespace
+   *  (NIL delimiter — mailbox names may contain "." and "/" as literal
+   *  characters); undefined = not reported by the server. */
+  delimiter?: string;
+  /** Subscription state; undefined when the server does not report it. */
+  subscribed?: boolean;
 };
 
 export type EmailAttachment = {
@@ -190,6 +196,14 @@ export interface MailBackend {
     limit: number,
   ): Promise<{ messages: EmailMessage[]; hasMore: boolean }>;
   getHighestUid(account: EmailAccount, folder: string): Promise<number>;
+  /** IMAP CREATE. Parents are created by the server when missing. Returns the
+   *  server-stored path (backends resolve namespace/case normalization). */
+  createFolder(account: EmailAccount, path: string): Promise<{ path: string; created: boolean }>;
+  /** IMAP RENAME. Servers move child folders along (and INBOX has special
+   *  semantics). Returned paths are server-stored/canonical. */
+  renameFolder(account: EmailAccount, path: string, newPath: string): Promise<{ path: string; newPath: string }>;
+  /** IMAP DELETE. The folder and its messages are removed; children may become unreachable. */
+  deleteFolder(account: EmailAccount, path: string): Promise<{ path: string }>;
 }
 
 export interface CacheStore {
@@ -201,4 +215,6 @@ export interface CacheStore {
 export interface CursorStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<void>;
+  /** Best-effort removal (folder_create resets the poll cursor on recreate). */
+  delete?(key: string): Promise<void>;
 }

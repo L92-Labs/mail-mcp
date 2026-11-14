@@ -22,5 +22,8 @@ export function kvCursors(kv: KVNamespace): CursorStore {
     async set(key, value) {
       await kv.put(key, value);
     },
+    async delete(key) {
+      await kv.delete(key);
+    },
   };
 }

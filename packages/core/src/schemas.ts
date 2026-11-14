@@ -40,6 +40,34 @@ export const accountsListSchema = z.object({});
 
 export const foldersListSchema = z.object({ account_name: accountName });
 
+const folderPath = (what: string) =>
+  z
+    .string()
+    .min(1)
+    .describe(
+      `${what} folder path, e.g. "Receipts" or nested "INBOX/Receipts". Use the exact paths and the hierarchy separator shown by folders_list.`,
+    );
+
+export const folderCreateSchema = z.object({
+  account_name: accountName,
+  path: folderPath("New"),
+});
+
+export const folderRenameSchema = z.object({
+  account_name: accountName,
+  path: folderPath("Existing"),
+  new_path: folderPath("New"),
+});
+
+export const folderDeleteSchema = z.object({
+  account_name: accountName,
+  path: folderPath("Folder to delete"),
+  confirm: z
+    .boolean()
+    .describe("Must be true. Deleting removes the folder and every message in it."),
+});
+
+
 export const findEmailsSchema = z.object({
   account_name: accountName,
   folder,
@@ -182,6 +210,9 @@ export const draftEmailSchema = z.object({
 export const TOOL_NAMES = [
   "accounts_list",
   "folders_list",
+  "folder_create",
+  "folder_rename",
+  "folder_delete",
   "emails_find",
   "email_get",
   "emails_modify",

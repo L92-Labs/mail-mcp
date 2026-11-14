@@ -15,16 +15,32 @@ import {
   parseFolderAlias,
   resolveSpecialFolder,
   shouldSaveSent,
+  SPECIAL_USE,
   truncate,
   type ReplyInput,
   type SpecialFolder,
 } from "./compose.js";
-import { pollNewMessages } from "./events.js";
+import { pollNewMessages, eventCursorKey } from "./events.js";
+import {
+  assertFolderManageable,
+  assertNotInbox,
+  findProtectedFolder,
+  isDescendantFolder,
+  isInboxPath,
+  normalizeFolderPath,
+  rejectSeparatorTricks,
+  resolveProtectedCandidates,
+  resolveStoredName,
+  type ProtectedFolder,
+} from "./folders.js";
 import {
   accountsListSchema,
   draftEmailSchema,
   eventsSchema,
   findEmailsSchema,
+  folderCreateSchema,
+  folderDeleteSchema,
+  folderRenameSchema,
   foldersListSchema,
   getEmailSchema,
   modifyEmailsSchema,
@@ -57,6 +73,8 @@ export type ToolMeta = {
   description: string;
   inputSchema: z.ZodObject;
   readOnly: boolean;
+  /** True when the tool removes data irreversibly (destructiveHint for MCP clients). */
+  destructive?: boolean;
 };
 
 export const TOOL_META: ToolMeta[] = [
@@ -72,9 +90,34 @@ export const TOOL_META: ToolMeta[] = [
     name: "folders_list",
     title: "List folders",
     description:
-      "List IMAP folders with their special use (\\Sent, \\Drafts, \\Trash, \\Archive, \\Junk).",
+      "List IMAP folders with their special use (\\Sent, \\Drafts, \\Trash, \\Archive, \\Junk) and the hierarchy delimiter for building nested paths.",
     inputSchema: foldersListSchema,
     readOnly: true,
+  },
+  {
+    name: "folder_create",
+    title: "Create folder",
+    description:
+      "Create a folder, e.g. \"Receipts\" or nested \"INBOX/Receipts\" (separator comes from folders_list). Missing parent folders are created by most servers. Returns created:false when the folder already exists. INBOX and special folders cannot be created.",
+    inputSchema: folderCreateSchema,
+    readOnly: false,
+  },
+  {
+    name: "folder_rename",
+    title: "Rename folder",
+    description:
+      "Rename or move a folder (children follow). Both the folder and its new path are guarded: INBOX and special folders (Sent, Drafts, Trash, Archive, Junk) cannot be renamed or become a rename destination.",
+    inputSchema: folderRenameSchema,
+    readOnly: false,
+  },
+  {
+    name: "folder_delete",
+    title: "Delete folder",
+    description:
+      "Delete a folder and every message in it; children may become unreachable. Requires confirm:true. INBOX and special folders (Sent, Drafts, Trash, Archive, Junk) cannot be deleted.",
+    inputSchema: folderDeleteSchema,
+    readOnly: false,
+    destructive: true,
   },
   {
     name: "emails_find",
@@ -149,16 +192,53 @@ async function cacheGeneration(ctx: DispatchContext, account: EmailAccount): Pro
 /** Invalidate cached listings for an account after a mutation. */
 async function bumpCache(ctx: DispatchContext, account: EmailAccount): Promise<void> {
   if (!ctx.cache || ctx.config.cacheTtlSeconds <= 0) return;
-  await ctx.cache.set(`gen|${account.name}`, String(Date.now()), 86_400);
+  // Random per bump: Date.now() collides for same-millisecond mutations and can
+  // move backwards under Workers clock skew, reviving a stale key.
+  const generation =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await ctx.cache.set(`gen|${account.name}`, generation, 86_400);
+  } catch {
+    // Best-effort: a failed cache write must never mask a successful mutation.
+  }
 }
 
 async function listFolders(ctx: DispatchContext, account: EmailAccount): Promise<FolderInfo[]> {
   return cachedJson(
     ctx.cache,
     ctx.config.cacheTtlSeconds,
-    cacheKey(["folders", account.name]),
+    cacheKey(["folders", account.name, await cacheGeneration(ctx, account)]),
     () => ctx.backend.listFolders(account),
   );
+}
+
+/**
+ * Folders the guard must keep intact beyond server-advertised special use:
+ * configured sent/drafts overrides and the same name-based fallbacks the
+ * special-folder resolver uses, so protection matches what the server
+ * actually relies on even without RFC 6154 attributes.
+ */
+function protectedFolders(account: EmailAccount, folders: FolderInfo[]): ProtectedFolder[] {
+  const resolved: ProtectedFolder[] = [];
+  const seen = new Set(folders.filter((f) => f.specialUse).map((f) => f.path));
+  for (const kind of ["sent", "drafts", "trash", "archive", "junk"] as const satisfies SpecialFolder[]) {
+    const override = kind === "sent" ? account.sentFolder : kind === "drafts" ? account.draftsFolder : undefined;
+    const configured = override ?? resolveSpecialFolder(folders, kind);
+    if (!configured) continue;
+    // Resolve to every plausible server-stored path (namespace prefix /
+    // case / duplicate leaf names may differ from the configured value —
+    // delivery/listing use the canonical form). Guard direction:
+    // over-protecting only widens the guard; under-protecting is the bug.
+    for (const candidate of resolveProtectedCandidates(folders, configured)) {
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        resolved.push({ path: candidate, use: SPECIAL_USE[kind] });
+      }
+    }
+  }
+  return resolved;
 }
 
 async function specialFolder(
@@ -294,6 +374,146 @@ export async function dispatchTool(
       const parsed = foldersListSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
       return { folders: await listFolders(ctx, account) };
+    }
+
+    case "folder_create": {
+      const parsed = folderCreateSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      const path = normalizeFolderPath(parsed.path);
+      if (isInboxPath(path)) {
+        throw new Error('INBOX already exists; create a subfolder instead, e.g. "INBOX/…"');
+      }
+      // Destructive/guard decisions need current server state: bypass the
+      // cache (another client may have changed special-use structure).
+      const folders = await ctx.backend.listFolders(account);
+      // Same aliasing refusal as rename/delete: a server-dependent trailing
+      // separator could create a path this tool could never manage again.
+      rejectSeparatorTricks(path, folders);
+      const special = findProtectedFolder(
+        resolveStoredName(folders, path),
+        folders,
+        protectedFolders(account, folders),
+      );
+      if (special) {
+        throw new Error(`"${special.path}" already exists as the ${special.use} special folder`);
+      }
+      const result = await ctx.backend.createFolder(account, path);
+      await bumpCache(ctx, account);
+      if (result.created) {
+        // A recreated folder may reuse a path whose old poll cursor exceeds its
+        // new UIDs; drop it so the next poll re-seeds at the current watermark.
+        // Both spellings (canonical result and raw argument) are cleaned up.
+        try {
+          for (const key of new Set([
+            eventCursorKey(account.name, result.path),
+            eventCursorKey(account.name, parsed.path),
+          ])) {
+            await ctx.cursors.delete?.(key);
+          }
+        } catch {
+          // best-effort
+        }
+      }
+      return {
+        created: result.created,
+        folder: result.path,
+      };
+    }
+
+    case "folder_rename": {
+      const parsed = folderRenameSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      assertNotInbox(parsed.path, "rename");
+      // Pre-rename snapshot, uncached: guards AND the set of folders the
+      // rename moves must reflect current server state. The source path
+      // resolves to its server-stored form first (namespace prefixes / case
+      // may differ from the raw argument) so guards and cursor keys use
+      // canonical paths throughout.
+      const folders = await ctx.backend.listFolders(account);
+      const sourceRoot = resolveStoredName(folders, parsed.path);
+      assertFolderManageable(sourceRoot, folders, "rename", protectedFolders(account, folders));
+      const sourceFolders = folders.filter(
+        (f) => f.path === sourceRoot || isDescendantFolder(f.path, sourceRoot, folders),
+      );
+      const newPath = normalizeFolderPath(parsed.new_path);
+      if (newPath === sourceRoot) {
+        throw new Error("new_path must differ from path");
+      }
+      // The destination becomes a parent on some servers; guard it like a source.
+      assertFolderManageable(newPath, folders, "rename", protectedFolders(account, folders));
+      const result = await ctx.backend.renameFolder(account, sourceRoot, newPath);
+      await bumpCache(ctx, account);
+      // RENAME moves the mailbox — and its captured children — with their
+      // UIDs: migrate poll cursors for exactly the folders that moved, so
+      // unrelated destinations keep their own cursors.
+      try {
+        for (const f of sourceFolders) {
+          const suffix = f.path.slice(sourceRoot.length);
+          // The poller keys cursors by whatever folder string the caller
+          // passed to emails_events — the canonical listing path, the raw
+          // (unprefixed) argument, and after the rename the destination's
+          // canonical or raw spelling. Seed/clean every plausible spelling;
+          // the highest watermark wins.
+          const newKeys = [
+            ...new Set([
+              eventCursorKey(account.name, result.newPath + suffix),
+              eventCursorKey(account.name, newPath + suffix),
+            ]),
+          ];
+          const oldKeys = [
+            ...new Set([
+              eventCursorKey(account.name, f.path),
+              eventCursorKey(account.name, parsed.path + suffix),
+            ]),
+          ];
+          const storedValues = (
+            await Promise.all(oldKeys.map(async (k) => ctx.cursors.get(k)))
+          ).filter((v): v is string => v !== null);
+          if (storedValues.length) {
+            const watermark = String(Math.max(...storedValues.map((v) => Number(v))));
+            for (const k of newKeys) await ctx.cursors.set(k, watermark);
+            for (const k of oldKeys) await ctx.cursors.delete?.(k);
+          } else {
+            // The moved folder's history is the source's: a residual cursor
+            // at its destination path is stale by definition.
+            for (const k of newKeys) await ctx.cursors.delete?.(k);
+          }
+        }
+      } catch {
+        // best-effort
+      }
+      return { renamed: true, folder: result.path, new_folder: result.newPath };
+    }
+
+    case "folder_delete": {
+      const parsed = folderDeleteSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      if (parsed.confirm !== true) {
+        throw new Error('folder_delete requires confirm:true — deleting removes the folder and every message in it');
+      }
+      assertNotInbox(parsed.path, "delete");
+      const folders = await ctx.backend.listFolders(account);
+      const path = assertFolderManageable(
+        resolveStoredName(folders, parsed.path),
+        folders,
+        "delete",
+        protectedFolders(account, folders),
+      );
+      const result = await ctx.backend.deleteFolder(account, path);
+      await bumpCache(ctx, account);
+      // Drop the poll cursor so a later recreation of this path re-seeds at
+      // the current watermark instead of hiding mail below the old one.
+      try {
+        for (const key of new Set([
+          eventCursorKey(account.name, result.path),
+          eventCursorKey(account.name, parsed.path),
+        ])) {
+          await ctx.cursors.delete?.(key);
+        }
+      } catch {
+        // best-effort
+      }
+      return { deleted: true, folder: result.path };
     }
 
     case "emails_find": {

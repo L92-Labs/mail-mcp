@@ -1,7 +1,10 @@
-import { CFImap, type Email as CfEmail, type SearchEmailsProps } from "cf-imap";
+import { CFImap, type Email as CfEmail, type SearchEmailsProps, type ResponseItem } from "cf-imap";
+import { parseLsubName } from "./lsub.js";
 import { Email as MimeEmail, WorkerMailer } from "worker-mailer";
 import {
+  isDescendantFolder,
   KNOWN_SPECIAL_USE,
+  resolveStoredName,
   extractAddress,
   htmlToText,
   makeEmailId,
@@ -204,6 +207,67 @@ function buildRaw(msg: OutgoingMessage): string {
     .replace(/^\.\./, ".");
 }
 
+// cf-imap 1.0.0 exposes no mailbox-management API; CREATE/RENAME/DELETE use its
+// internal command plumbing exactly as its own methods (getFolders, selectFolder) do.
+type CfImapInternals = {
+  command(fn: () => Promise<void>): Promise<void>;
+  requireConnection(): void;
+  nextTag(): string;
+  send(tag: string, line: string): Promise<void>;
+  encodeMailboxName(name: string): string;
+  decodeMailboxName(name: string): string;
+  stream: { readUntilTag(tag: string): Promise<{ items?: ResponseItem[] }> };
+};
+
+const internals = (client: CFImap): CfImapInternals => client as unknown as CfImapInternals;
+
+/** IMAP quoted string (RFC 3501 §4.3). */
+function quoteMailbox(name: string): string {
+  return `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/** One tagged IMAP command; throws with the server's NO/BAD text on failure. */
+async function mailboxCommand(client: CFImap, line: string): Promise<void> {
+  // Defense in depth: a stray CR/LF would terminate the command early and let
+  // the remainder run as a new IMAP command. Tool inputs are already screened
+  // in core; this protects direct backend calls.
+  if (/[\r\n]/.test(line)) throw new Error("IMAP command contains a line break");
+  const c = internals(client);
+  await c.command(async () => {
+    c.requireConnection();
+    const tag = c.nextTag();
+    await c.send(tag, line);
+    await c.stream.readUntilTag(tag);
+  });
+}
+
+/**
+ * Subscribed mailbox paths via LSUB — plain LIST does not establish
+ * subscription membership, and cf-imap exposes no LSUB API, so the untagged
+ * lines are parsed here. Best-effort: unparsable names are simply absent.
+ */
+async function subscribedPaths(client: CFImap): Promise<Set<string>> {
+  const c = internals(client);
+  const out = new Set<string>();
+  await c.command(async () => {
+    c.requireConnection();
+    const tag = c.nextTag();
+    await c.send(tag, `LSUB "" "*"`);
+    const { items } = await c.stream.readUntilTag(tag);
+    for (const item of items ?? []) {
+      const name = parseLsubName(item.line, item.literal);
+      if (name) out.add(c.decodeMailboxName(name));
+    }
+  });
+  return out;
+}
+
+/** Servers signal duplicate CREATE with an [ALREADYEXISTS] code or plain text. */
+function isAlreadyExists(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bALREADYEXISTS\b|already exists/i.test(message);
+}
+
 export function createWorkerBackend(): MailBackend {
   return {
     async listFolders(account) {
@@ -214,6 +278,8 @@ export function createWorkerBackend(): MailBackend {
             name: f.name.split(f.delimiter || "/").pop() || f.name,
             path: f.name,
             specialUse: normalizeSpecialUse(f.attributes),
+            delimiter: f.delimiter ?? "", // "" = NIL (explicitly flat)
+            subscribed: f.attributes?.some((a) => a.toLowerCase() === "subscribed") || undefined,
           }),
         );
       });
@@ -346,6 +412,144 @@ export function createWorkerBackend(): MailBackend {
         const status = await client.status(folder, ["UIDNEXT"]);
         // cf-imap lowercases STATUS keys.
         return Math.max(0, (status.uidnext ?? status.UIDNEXT ?? 1) - 1);
+      });
+    },
+
+    async createFolder(account, path) {
+      return withImap(account, async (client) => {
+        const c = internals(client);
+        const name = quoteMailbox(c.encodeMailboxName(path));
+        let created: boolean;
+        try {
+          await mailboxCommand(client, `CREATE ${name}`);
+          created = true;
+        } catch (error) {
+          if (!isAlreadyExists(error)) throw error;
+          created = false;
+        }
+        // Resolve the server-stored path (namespace prefix / case may differ
+        // from the raw argument) so cursor keys and results use server truth.
+        let stored = path;
+        try {
+          const after = await client.getFolders("", "*");
+          stored = resolveStoredName(after, path);
+        } catch {
+          // best-effort
+        }
+        if (created) {
+          // Subscribe so the folder shows up for clients listing subscribed mailboxes only.
+          try {
+            await mailboxCommand(
+              client,
+              `SUBSCRIBE ${quoteMailbox(c.encodeMailboxName(stored))}`,
+            );
+          } catch {
+            // best-effort
+          }
+        }
+        return { path: stored, created };
+      });
+    },
+
+    async renameFolder(account, path, newPath) {
+      return withImap(account, async (client) => {
+        const c = internals(client);
+        // Children follow the rename, but subscriptions do not (RFC 3501 §6.3.6):
+        // capture descendants before, resubscribe at the new paths after.
+        let storedNames: Array<{ name: string; delimiter?: string }> = [];
+        let folders: FolderInfo[] = [];
+        try {
+          const raw = await client.getFolders("", "*");
+          // Full stored paths feed sourceRoot resolution; the remapped FolderInfo
+          // entries feed the descendant filter and subscription migration.
+          storedNames = raw.map((f) => ({
+            name: f.name,
+            delimiter: f.delimiter ?? "", // "" = NIL (explicitly flat)
+          }));
+          folders = raw.map((f) => ({
+            name: f.name.split(f.delimiter || "/").pop() || f.name,
+            path: f.name,
+            delimiter: f.delimiter ?? "", // "" = NIL (explicitly flat)
+            subscribed:
+              f.attributes?.some((a) => a.toLowerCase() === "subscribed") || undefined,
+          }));
+        } catch {
+          // best-effort
+        }
+        // The server-stored source path (namespace prefix / case may differ
+        // from the raw argument) anchors the child mapping.
+        const sourceRoot = resolveStoredName(storedNames, path);
+        // Migrate exactly the children the server reports as subscribed. LSUB
+        // is the source of truth when plain LIST carries no \Subscribed
+        // attributes (most servers); without any signal, every mailbox is
+        // assumed subscribed (RFC 3501) and all children migrate.
+        const reportsState = folders.some((f) => f.subscribed !== undefined);
+        let subscribedSet: Set<string> | null = null;
+        if (!reportsState) {
+          try {
+            subscribedSet = await subscribedPaths(client);
+          } catch {
+            // LSUB failed: fall back to the blanket RFC assumption.
+            subscribedSet = null;
+          }
+        }
+        const oldChildren = folders
+          .filter(
+            (f) =>
+              isDescendantFolder(f.path, sourceRoot, folders) &&
+              (reportsState
+                ? f.subscribed === true
+                : subscribedSet === null || subscribedSet.has(f.path)),
+          )
+          .map((f) => f.path);
+        await mailboxCommand(client, `RENAME ${quoteMailbox(c.encodeMailboxName(path))} ${quoteMailbox(c.encodeMailboxName(newPath))}`);
+        // Resolve the server-stored destination path (namespace prefix / case
+        // may differ from the raw argument) so cursor keys and results use
+        // server truth.
+        let canonical = newPath;
+        try {
+          const after = await client.getFolders("", "*");
+          canonical = resolveStoredName(after, newPath);
+        } catch {
+          // best-effort
+        }
+        // Subscribe the new path BEFORE dropping the old one: worst case is a
+        // harmless stale duplicate subscription, never a folder that is
+        // subscribed nowhere for subscribed-only clients.
+        try {
+          await mailboxCommand(client, `SUBSCRIBE ${quoteMailbox(c.encodeMailboxName(canonical))}`);
+          await mailboxCommand(client, `UNSUBSCRIBE ${quoteMailbox(c.encodeMailboxName(sourceRoot))}`);
+        } catch {
+          // best-effort
+        }
+        for (const child of oldChildren) {
+          try {
+            const newChild = quoteMailbox(
+              c.encodeMailboxName(`${canonical}${child.slice(sourceRoot.length)}`),
+            );
+            await mailboxCommand(client, `SUBSCRIBE ${newChild}`);
+            await mailboxCommand(client, `UNSUBSCRIBE ${quoteMailbox(c.encodeMailboxName(child))}`);
+          } catch {
+            // best-effort
+          }
+        }
+        return { path: sourceRoot, newPath: canonical };
+      });
+    },
+
+    async deleteFolder(account, path) {
+      return withImap(account, async (client) => {
+        const c = internals(client);
+        const name = quoteMailbox(c.encodeMailboxName(path));
+        await mailboxCommand(client, `DELETE ${name}`);
+        // Unsubscribe only after a successful DELETE: a rejected deletion must
+        // not leave an existing folder hidden from subscribed-only clients.
+        try {
+          await mailboxCommand(client, `UNSUBSCRIBE ${name}`);
+        } catch {
+          // best-effort
+        }
+        return { path };
       });
     },
   };

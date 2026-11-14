@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- Full folder management: `folder_create`, `folder_rename` and `folder_delete`
+  work on both runtimes (Node/imapflow and Workers/cf-imap).
+- `folder_delete` requires `confirm: true`; INBOX, special-use folders and
+  parents containing them are always refused.
+- Hardened guards (review findings): folder paths with control characters are
+  rejected before any IMAP command is built; separator aliasing (trailing and
+  doubled delimiters) fails closed; rename destinations are guarded like
+  sources; INBOX and special folders cannot be created either; configured
+  `sent_folder`/`drafts_folder` and name-resolved specials are protected even
+  when the server omits special-use attributes.
+- `folders_list` cache is invalidated by folder mutations (generation now part
+  of the cache key), and `folders_list` reports each folder's hierarchy
+  delimiter for building nested paths.
+- Duplicate `folder_create` returns `created: false` consistently on both
+  runtimes (ALREADYEXISTS / "already exists" detection).
+- Review round 3: folder paths with surrounding whitespace are refused (exact
+  mailbox names are never silently trimmed); create-side separator aliasing is
+  refused like rename/delete; the event poll cursor is reset when a folder is
+  created so recreated folders don't lose events; cache invalidation is
+  collision-safe (random generation) and best-effort (a failed cache write
+  never masks a successful mutation); the Workers delete unsubscribes only
+  after a successful DELETE; Node create probes existence when imapflow's
+  internal SUBSCRIBE fails after a successful CREATE.
+- `pnpm e2e:local` reproduces the CI GreenMail e2e suite locally with one
+  command (container lifecycle, readiness wait, teardown, port overrides).
+
 ## 0.2.0 — 2026-10-19
 
 - Read, search, paginate and organize mail across multiple IMAP accounts.
