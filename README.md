@@ -47,7 +47,10 @@ Inspired by [email-smtp-imap-mcp](https://github.com/samihalawa/email-smtp-imap-
 | Tool | Mode | What it does |
 |------|------|--------------|
 | `accounts_list` | all | Mailboxes, default account, what each can do |
-| `folders_list` | all | Folders with special use (`\Sent`, `\Drafts`, `\Trash`, `\Archive`, `\Junk`) |
+| `folders_list` | all | Folders with special use (`\Sent`, `\Drafts`, `\Trash`, `\Archive`, `\Junk`) and the hierarchy delimiter |
+| `folder_create` | all | Create a folder, e.g. `INBOX/Receipts` (delimiter comes from `folders_list`); missing parents are created by most servers |
+| `folder_rename` | all | Rename or move a folder; children follow. INBOX and special folders are protected |
+| `folder_delete` | all | Delete a folder and every message in it; requires `confirm: true`. INBOX and special folders are protected |
 | `emails_find` | all | Search/list newest first: `query`, filters (from/to/subject/unread/flagged/dates/attachments), `limit` + `cursor` → `next_cursor`, `total` |
 | `email_get` | all | One email in full: text body (HTML → text), attachments (+ content on request), threading ids. Doesn't mark it read unless `mark_read` |
 | `emails_modify` | all | Read/unread, flag/unflag, move: folder path or alias `archive`/`trash`/`junk`/`inbox` |

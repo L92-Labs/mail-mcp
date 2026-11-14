@@ -54,6 +54,9 @@ function fakeBackend(overrides: Partial<MailBackend> = {}) {
     appendMessage: vi.fn(async () => ({ uid: 99 })),
     listNewSince: vi.fn(async () => ({ messages: [], hasMore: false })),
     getHighestUid: vi.fn(async () => 42),
+    createFolder: vi.fn(async (_a: EmailAccount, path: string) => ({ path, created: true })),
+    renameFolder: vi.fn(async (_a: EmailAccount, path: string, newPath: string) => ({ path, newPath })),
+    deleteFolder: vi.fn(async (_a: EmailAccount, path: string) => ({ path })),
     ...overrides,
   };
   return backend satisfies MailBackend;
@@ -303,6 +306,84 @@ describe("read tools", () => {
     };
     expect(r.moved_to).toBe("Trash");
     expect(b.modifyEmails).toHaveBeenCalledWith(account, expect.objectContaining({ moveToFolder: "Trash" }));
+  });
+});
+
+describe("folder management", () => {
+  it("folder_create creates a folder", async () => {
+    const b = fakeBackend();
+    const r = (await dispatchTool("folder_create", { path: "INBOX/Receipts" }, makeCtx(b))) as {
+      created: boolean;
+      folder: string;
+    };
+    expect(b.createFolder).toHaveBeenCalledWith(account, "INBOX/Receipts");
+    expect(r).toMatchObject({ created: true, folder: "INBOX/Receipts" });
+  });
+
+  it("folder_create is available in pull mode", async () => {
+    const b = fakeBackend();
+    await expect(
+      dispatchTool("folder_create", { path: "Receipts" }, makeCtx(b, { mode: "pull" })),
+    ).resolves.toMatchObject({ created: true });
+  });
+
+  it("folder_rename renames a regular folder", async () => {
+    const b = fakeBackend();
+    const r = (await dispatchTool(
+      "folder_rename",
+      { path: "Receipts", new_path: "Archive/Receipts" },
+      makeCtx(b),
+    )) as { renamed: boolean; folder: string; new_folder: string };
+    expect(b.renameFolder).toHaveBeenCalledWith(account, "Receipts", "Archive/Receipts");
+    expect(r).toMatchObject({ renamed: true, folder: "Receipts", new_folder: "Archive/Receipts" });
+  });
+
+  it("folder_rename refuses INBOX and special folders", async () => {
+    const b = fakeBackend();
+    for (const path of ["INBOX", "inbox", "Sent", "Trash"]) {
+      await expect(
+        dispatchTool("folder_rename", { path, new_path: "X" }, makeCtx(b)),
+      ).rejects.toThrow(/cannot|INBOX/);
+    }
+    expect(b.renameFolder).not.toHaveBeenCalled();
+  });
+
+  it("folder_rename refuses a parent of a special folder", async () => {
+    const b = fakeBackend({
+      listFolders: vi.fn(async () => [
+        { name: "INBOX", path: "INBOX", delimiter: "/" },
+        { name: "Clients", path: "Clients", delimiter: "/" },
+        { name: "Sent", path: "Clients/Sent", specialUse: "\\Sent", delimiter: "/" },
+      ]),
+    });
+    await expect(
+      dispatchTool("folder_rename", { path: "Clients", new_path: "Customers" }, makeCtx(b)),
+    ).rejects.toThrow(/contains the special folder/);
+  });
+
+  it("folder_delete requires confirm", async () => {
+    const b = fakeBackend();
+    // Schema: confirm is a required boolean.
+    await expect(
+      dispatchTool("folder_delete", { path: "Receipts" }, makeCtx(b)),
+    ).rejects.toThrow(/confirm/);
+    // Dispatch: explicit false is refused too.
+    await expect(
+      dispatchTool("folder_delete", { path: "Receipts", confirm: false }, makeCtx(b)),
+    ).rejects.toThrow(/confirm:true/);
+    expect(b.deleteFolder).not.toHaveBeenCalled();
+    await dispatchTool("folder_delete", { path: "Receipts", confirm: true }, makeCtx(b));
+    expect(b.deleteFolder).toHaveBeenCalledWith(account, "Receipts");
+  });
+
+  it("folder_delete refuses INBOX and special folders", async () => {
+    const b = fakeBackend();
+    for (const path of ["INBOX", "inbox", "Sent", "Trash"]) {
+      await expect(
+        dispatchTool("folder_delete", { path, confirm: true }, makeCtx(b)),
+      ).rejects.toThrow(/cannot|INBOX/);
+    }
+    expect(b.deleteFolder).not.toHaveBeenCalled();
   });
 });
 

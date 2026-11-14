@@ -20,11 +20,15 @@ import {
   type SpecialFolder,
 } from "./compose.js";
 import { pollNewMessages } from "./events.js";
+import { assertFolderManageable, isInboxPath, normalizeFolderPath } from "./folders.js";
 import {
   accountsListSchema,
   draftEmailSchema,
   eventsSchema,
   findEmailsSchema,
+  folderCreateSchema,
+  folderDeleteSchema,
+  folderRenameSchema,
   foldersListSchema,
   getEmailSchema,
   modifyEmailsSchema,
@@ -57,6 +61,8 @@ export type ToolMeta = {
   description: string;
   inputSchema: z.ZodObject;
   readOnly: boolean;
+  /** True when the tool removes data irreversibly (destructiveHint for MCP clients). */
+  destructive?: boolean;
 };
 
 export const TOOL_META: ToolMeta[] = [
@@ -72,9 +78,34 @@ export const TOOL_META: ToolMeta[] = [
     name: "folders_list",
     title: "List folders",
     description:
-      "List IMAP folders with their special use (\\Sent, \\Drafts, \\Trash, \\Archive, \\Junk).",
+      "List IMAP folders with their special use (\\Sent, \\Drafts, \\Trash, \\Archive, \\Junk) and the hierarchy delimiter for building nested paths.",
     inputSchema: foldersListSchema,
     readOnly: true,
+  },
+  {
+    name: "folder_create",
+    title: "Create folder",
+    description:
+      "Create a folder, e.g. \"Receipts\" or nested \"INBOX/Receipts\" (separator comes from folders_list). Missing parent folders are created by most servers. INBOX and the special folders cannot be created.",
+    inputSchema: folderCreateSchema,
+    readOnly: false,
+  },
+  {
+    name: "folder_rename",
+    title: "Rename folder",
+    description:
+      "Rename or move a folder (children follow). INBOX and special folders (Sent, Drafts, Trash, Archive, Junk) cannot be renamed.",
+    inputSchema: folderRenameSchema,
+    readOnly: false,
+  },
+  {
+    name: "folder_delete",
+    title: "Delete folder",
+    description:
+      "Delete a folder and every message in it; children may become unreachable. Requires confirm:true. INBOX and special folders (Sent, Drafts, Trash, Archive, Junk) cannot be deleted.",
+    inputSchema: folderDeleteSchema,
+    readOnly: false,
+    destructive: true,
   },
   {
     name: "emails_find",
@@ -294,6 +325,46 @@ export async function dispatchTool(
       const parsed = foldersListSchema.parse(args ?? {});
       const account = resolveAccount(ctx.config, parsed.account_name);
       return { folders: await listFolders(ctx, account) };
+    }
+
+    case "folder_create": {
+      const parsed = folderCreateSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      const path = normalizeFolderPath(parsed.path);
+      const result = await ctx.backend.createFolder(account, path);
+      await bumpCache(ctx, account);
+      return {
+        created: result.created,
+        folder: result.path,
+        ...(isInboxPath(result.path) ? { note: "INBOX always exists; most servers report it as already created" } : {}),
+      };
+    }
+
+    case "folder_rename": {
+      const parsed = folderRenameSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      const folders = await listFolders(ctx, account);
+      const path = assertFolderManageable(parsed.path, folders, "rename");
+      const newPath = normalizeFolderPath(parsed.new_path);
+      if (newPath.toLowerCase() === path.toLowerCase()) {
+        throw new Error("new_path must differ from path");
+      }
+      const result = await ctx.backend.renameFolder(account, path, newPath);
+      await bumpCache(ctx, account);
+      return { renamed: true, folder: result.path, new_folder: result.newPath };
+    }
+
+    case "folder_delete": {
+      const parsed = folderDeleteSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      if (parsed.confirm !== true) {
+        throw new Error('folder_delete requires confirm:true — deleting removes the folder and every message in it');
+      }
+      const folders = await listFolders(ctx, account);
+      const path = assertFolderManageable(parsed.path, folders, "delete");
+      const result = await ctx.backend.deleteFolder(account, path);
+      await bumpCache(ctx, account);
+      return { deleted: true, folder: result.path };
     }
 
     case "emails_find": {

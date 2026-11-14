@@ -58,6 +58,8 @@ export type FolderInfo = {
   path: string;
   /** Normalized RFC 6154 attribute, e.g. "\\Sent", "\\Drafts", "\\Trash". */
   specialUse?: string;
+  /** Hierarchy separator, e.g. "/" or "."; empty when the server reports none. */
+  delimiter?: string;
 };
 
 export type EmailAttachment = {
@@ -190,6 +192,12 @@ export interface MailBackend {
     limit: number,
   ): Promise<{ messages: EmailMessage[]; hasMore: boolean }>;
   getHighestUid(account: EmailAccount, folder: string): Promise<number>;
+  /** IMAP CREATE. Parents are created by the server when missing. */
+  createFolder(account: EmailAccount, path: string): Promise<{ path: string; created: boolean }>;
+  /** IMAP RENAME. Servers move child folders along (and INBOX has special semantics). */
+  renameFolder(account: EmailAccount, path: string, newPath: string): Promise<{ path: string; newPath: string }>;
+  /** IMAP DELETE. The folder and its messages are removed; children may become unreachable. */
+  deleteFolder(account: EmailAccount, path: string): Promise<{ path: string }>;
 }
 
 export interface CacheStore {

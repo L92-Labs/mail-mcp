@@ -224,6 +224,7 @@ export function createNodeBackend(): MailBackend {
             name: b.name,
             path: b.path,
             specialUse: normalizeSpecialUse(b.specialUse),
+            delimiter: b.delimiter || undefined,
           }),
         );
       });
@@ -401,6 +402,34 @@ export function createNodeBackend(): MailBackend {
       return withImap(account, async (client) => {
         const status = await client.status(folder, { uidNext: true });
         return Math.max(0, (status.uidNext ?? 1) - 1);
+      });
+    },
+
+    async createFolder(account, path) {
+      return withImap(account, async (client) => {
+        const res = await client.mailboxCreate(path);
+        // imapflow subscribes on create; keep the result shape backend-agnostic.
+        return { path: res?.path ?? path, created: res?.created !== false };
+      });
+    },
+
+    async renameFolder(account, path, newPath) {
+      return withImap(account, async (client) => {
+        const res = await client.mailboxRename(path, newPath);
+        return { path: res?.path ?? path, newPath: res?.newPath ?? newPath };
+      });
+    },
+
+    async deleteFolder(account, path) {
+      return withImap(account, async (client) => {
+        const res = await client.mailboxDelete(path);
+        // Some servers keep the subscription after DELETE; drop it best-effort.
+        try {
+          await client.mailboxUnsubscribe(path);
+        } catch {
+          // ignore
+        }
+        return { path: res?.path ?? path };
       });
     },
   };

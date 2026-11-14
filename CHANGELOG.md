@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Full folder management: `folder_create`, `folder_rename` and `folder_delete`
+  work on both runtimes (Node/imapflow and Workers/cf-imap).
+- `folder_delete` requires `confirm: true`; INBOX, special-use folders and
+  parents containing them are always refused.
+- `folders_list` now reports each folder's hierarchy delimiter for building
+  nested paths.
+
 ## 0.2.0 — 2026-10-19
 
 - Read, search, paginate and organize mail across multiple IMAP accounts.

@@ -44,6 +44,32 @@ Use `folders_list` for actual folder paths; aliases also include `trash`, `junk`
 and `inbox`. A move changes the message ID; search in the destination again.
 `pull` mode permits these changes. There is no strict read-only mode yet.
 
+## Manage folders
+
+`folders_list` returns each folder's `delimiter` (`/` or `.` depending on the
+provider) — use it when building nested paths.
+
+`folder_create` — a top-level folder, or one nested under INBOX:
+
+```json
+{"account_name":"work","path":"Receipts"}
+{"account_name":"work","path":"INBOX/Receipts"}
+```
+
+`folder_rename` — rename or move a folder; child folders follow:
+
+```json
+{"account_name":"work","path":"Receipts","new_path":"Finance/Receipts"}
+```
+
+`folder_delete` — remove a folder and every message in it. The explicit
+`confirm:true` is deliberate; INBOX and the special folders (Sent, Drafts,
+Trash, Archive, Junk) are always refused:
+
+```json
+{"account_name":"work","path":"Receipts","confirm":true}
+```
+
 ## Draft, reply and send
 
 Start with `MAIL_MODE=draft`. `email_draft` can create a new message or a threaded

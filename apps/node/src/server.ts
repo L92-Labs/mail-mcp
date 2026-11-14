@@ -29,7 +29,7 @@ export function buildMcpServer(ctx: DispatchContext): McpServer {
         inputSchema: tool.inputSchema,
         annotations: {
           readOnlyHint: tool.readOnly,
-          destructiveHint: false,
+          destructiveHint: tool.destructive === true,
           openWorldHint: tool.name === "email_send" || tool.name === "email_respond",
         },
       },

@@ -204,6 +204,35 @@ function buildRaw(msg: OutgoingMessage): string {
     .replace(/^\.\./, ".");
 }
 
+// cf-imap 1.0.0 exposes no mailbox-management API; CREATE/RENAME/DELETE use its
+// internal command plumbing exactly as its own methods (getFolders, selectFolder) do.
+type CfImapInternals = {
+  command(fn: () => Promise<void>): Promise<void>;
+  requireConnection(): void;
+  nextTag(): string;
+  send(tag: string, line: string): Promise<void>;
+  encodeMailboxName(name: string): string;
+  stream: { readUntilTag(tag: string): Promise<unknown> };
+};
+
+const internals = (client: CFImap): CfImapInternals => client as unknown as CfImapInternals;
+
+/** IMAP quoted string (RFC 3501 §4.3). */
+function quoteMailbox(name: string): string {
+  return `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/** One tagged IMAP command; throws with the server's NO/BAD text on failure. */
+async function mailboxCommand(client: CFImap, line: string): Promise<void> {
+  const c = internals(client);
+  await c.command(async () => {
+    c.requireConnection();
+    const tag = c.nextTag();
+    await c.send(tag, line);
+    await c.stream.readUntilTag(tag);
+  });
+}
+
 export function createWorkerBackend(): MailBackend {
   return {
     async listFolders(account) {
@@ -214,6 +243,7 @@ export function createWorkerBackend(): MailBackend {
             name: f.name.split(f.delimiter || "/").pop() || f.name,
             path: f.name,
             specialUse: normalizeSpecialUse(f.attributes),
+            delimiter: f.delimiter || undefined,
           }),
         );
       });
@@ -346,6 +376,52 @@ export function createWorkerBackend(): MailBackend {
         const status = await client.status(folder, ["UIDNEXT"]);
         // cf-imap lowercases STATUS keys.
         return Math.max(0, (status.uidnext ?? status.UIDNEXT ?? 1) - 1);
+      });
+    },
+
+    async createFolder(account, path) {
+      return withImap(account, async (client) => {
+        const c = internals(client);
+        const name = quoteMailbox(c.encodeMailboxName(path));
+        await mailboxCommand(client, `CREATE ${name}`);
+        // Subscribe so the folder shows up for clients listing subscribed mailboxes only.
+        try {
+          await mailboxCommand(client, `SUBSCRIBE ${name}`);
+        } catch {
+          // best-effort
+        }
+        return { path, created: true };
+      });
+    },
+
+    async renameFolder(account, path, newPath) {
+      return withImap(account, async (client) => {
+        const c = internals(client);
+        const oldName = quoteMailbox(c.encodeMailboxName(path));
+        const newName = quoteMailbox(c.encodeMailboxName(newPath));
+        await mailboxCommand(client, `RENAME ${oldName} ${newName}`);
+        // Servers should move subscriptions along; enforce it best-effort.
+        try {
+          await mailboxCommand(client, `UNSUBSCRIBE ${oldName}`);
+          await mailboxCommand(client, `SUBSCRIBE ${newName}`);
+        } catch {
+          // best-effort
+        }
+        return { path, newPath };
+      });
+    },
+
+    async deleteFolder(account, path) {
+      return withImap(account, async (client) => {
+        const c = internals(client);
+        const name = quoteMailbox(c.encodeMailboxName(path));
+        try {
+          await mailboxCommand(client, `UNSUBSCRIBE ${name}`);
+        } catch {
+          // best-effort
+        }
+        await mailboxCommand(client, `DELETE ${name}`);
+        return { path };
       });
     },
   };
