@@ -61,8 +61,9 @@ class FakeManageSieveServer {
       ...(this.mode === "starttls" && !this.upgraded ? ['"STARTTLS"'] : []),
       this.literalCapName
         ? // RFC 5804 §4: capability names may arrive as synchronised
-          // literals — {5} announces the 5 bytes "SIEVE", then the value.
-          '{5}\r\nSIEVE "FILEINTO"'
+          // literals — and the VALUE may follow as one too: {5} announces
+          // "SIEVE", {8} announces "fileinto".
+          '{5}\r\nSIEVE {8}\r\nfileinto'
         : '"SIEVE" "FILEINTO"',
       '"VERSION" "1.0"',
     ];
@@ -376,20 +377,23 @@ describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
   it("LOGOUT closes the connection", async () => {
     await client.close();
   });
-  it("decodes capability names delivered as literals (RFC 5804 §4)", async () => {
+  it("decodes capability names + values delivered as literals (RFC 5804 §4)", async () => {
     const server = new FakeManageSieveServer("plain");
     server.literalCapName = true;
     const port = await server.listen();
     let client: ManageSieveClient | null = null;
     try {
       // With the name kept only in the remainder, connect() would reject a
-      // compliant server claiming it does not advertise SIEVE support.
+      // compliant server claiming it does not advertise SIEVE support; with
+      // the value's own literal left unresolved, "{8}" would leak in as a
+      // capability token.
       client = await ManageSieveClient.connect(
         { host: "127.0.0.1", port, secure: "plain" },
         TEST_ACCOUNT,
       );
       expect(client.capabilities).toContain("SIEVE");
-      expect(client.capabilities).toContain("FILEINTO");
+      expect(client.capabilities).toContain("fileinto");
+      expect(client.capabilities).not.toContain("{8}");
     } finally {
       await client?.close().catch(() => client!.destroy());
       server.close();

@@ -378,8 +378,24 @@ export class ManageSieveClient {
         // exact byte boundary stays in literalValues[i] so a name like
         // "foo ACTIVE" is never confused with the ACTIVE marker.
         const bytes = await this.readLiteralBytes(Number(literal[1]));
-        const rest = await this.readLine();
-        push(rest, bytes);
+        let rest = await this.readLine();
+        // The remainder may announce FURTHER literals (RFC 5804 §4: a
+        // capability VALUE may follow a literal NAME as a literal too).
+        // Resolve them the same way as the tagged path: scanning applies
+        // only to fresh wire segments — decoded bytes are data, never
+        // framing, so a value ending in "{M}" cannot hijack the dialogue.
+        let assembled = "";
+        for (;;) {
+          const t = /\{(\d+)\}$/.exec(rest);
+          if (!t) {
+            assembled += rest;
+            break;
+          }
+          assembled += rest.slice(0, t.index);
+          assembled += await this.readLiteralBytes(Number(t[1]));
+          rest = await this.readLine();
+        }
+        push(assembled, bytes);
         continue;
       }
       // Trailing literal: a tagged line whose human-readable message travels
