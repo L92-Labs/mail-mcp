@@ -343,10 +343,22 @@ export class ManageSieveClient {
       // §2.12 multiline compile errors — quoted strings cannot hold raw
       // CRLFs). Resolve the bytes into the line before classifying it, or
       // they would linger in the buffer and corrupt the next exchange.
-      for (let t = /\{(\d+)\}$/.exec(line); t; t = /\{(\d+)\}$/.exec(line)) {
-        const bytes = await this.readLiteralBytes(Number(t[1]));
-        line = line.slice(0, t.index) + bytes + (await this.readLine());
+      // Decoded bytes are DATA, never framing: scanning continues only on
+      // fresh wire segments, so a message ending in "{N}" cannot hijack
+      // the dialogue (e.g. `NO {16}` + "syntax error {1}").
+      let out = "";
+      let wire = line;
+      for (;;) {
+        const t = /\{(\d+)\}$/.exec(wire);
+        if (!t) {
+          out += wire;
+          break;
+        }
+        out += wire.slice(0, t.index);
+        out += await this.readLiteralBytes(Number(t[1]));
+        wire = await this.readLine();
       }
+      line = out;
       if (isSieveBye(line)) {
         this.destroy();
         throw new Error(`ManageSieve server sent BYE: ${sieveTaggedMessage(line.slice(4).trim())}`);

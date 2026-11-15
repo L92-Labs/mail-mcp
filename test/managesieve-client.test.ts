@@ -36,6 +36,8 @@ class FakeManageSieveServer {
   nonexistentDelete = false;
   /** CHECKSCRIPT replies NO with a multiline literal error (§2.12). */
   multilineCheckError = false;
+  /** CHECKSCRIPT replies NO whose literal message ends in "{N}". */
+  messageEndsWithBrace = false;
 
   constructor(private readonly mode: "plain" | "implicit-tls" | "starttls" = "plain") {}
 
@@ -126,6 +128,12 @@ class FakeManageSieveServer {
     }
     if (line.startsWith("PUTSCRIPT") || line.startsWith("CHECKSCRIPT")) {
       const last = this.received[this.received.length - 1] ?? "";
+      if (this.messageEndsWithBrace) {
+        // The decoded message itself ends in "{1}" — data, not framing.
+        const msg = "syntax error {1}";
+        socket.write(`NO {${Buffer.byteLength(msg)}}\r\n${msg}\r\n`);
+        return;
+      }
       if (this.multilineCheckError) {
         // RFC 5804 §2.12: multi-error reports travel as a multiline literal.
         const errText = "line 1: syntax error\nline 2: unknown command";
@@ -299,6 +307,16 @@ describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
     expect(r.valid).toBe(false);
     expect(r.errors).toContain("line 1: syntax error");
     expect(r.errors).toContain("line 2: unknown command");
+  });
+
+  it("decoded literal messages ending in {N} are data, not framing", async () => {
+    server.messageEndsWithBrace = true;
+    const r = await client.checkScript("bad;");
+    server.messageEndsWithBrace = false;
+    // The decoded "{1}" did not hijack framing detection: the error came
+    // back promptly instead of hanging on a phantom 1-byte literal.
+    expect(r.valid).toBe(false);
+    expect(r.errors).toBe("syntax error {1}");
   });
 
   it("SETACTIVE and DELETESCRIPT send quoted names", async () => {
