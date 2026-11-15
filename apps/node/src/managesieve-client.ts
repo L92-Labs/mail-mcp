@@ -79,6 +79,7 @@ export class ManageSieveClient {
       const secure = tls.connect({ host: config.host, port: config.port, rejectUnauthorized: tlsVerify });
       client = new ManageSieveClient(secure, config.host);
       await client.waitConnected();
+      await client.readGreeting();
     } else {
       client = new ManageSieveClient(
         net.createConnection({ host: config.host, port: config.port }),
@@ -87,17 +88,23 @@ export class ManageSieveClient {
       await client.waitConnected();
       await client.readGreeting();
       if (config.secure === "starttls") {
-        const caps = await client.capability();
-        if (!caps.some((c) => c.toUpperCase() === "STARTTLS")) {
+        // RFC 5804 §2.2: send STARTTLS and await its OK; the TLS handshake
+        // begins immediately after the CRLF of that OK. TLS bytes must
+        // never precede the command.
+        if (!client.capabilities.some((c) => c.toUpperCase() === "STARTTLS")) {
           await client.close();
           throw new Error(
             `ManageSieve server ${config.host}:${config.port} does not advertise STARTTLS`,
           );
         }
+        await client.command("STARTTLS");
         await client.startTls(tlsVerify);
+        // §2.2: the server re-issues its capability greeting immediately
+        // after the handshake (verified against Dovecot Pigeonhole: the
+        // fresh list drops STARTTLS and widens SASL).
+        await client.readGreeting();
       }
     }
-    await client.capability(); // refresh capabilities (post-TLS where applicable)
     if (!client.capabilities.some((c) => c.toUpperCase() === "SIEVE")) {
       await client.close();
       throw new Error(
@@ -274,12 +281,21 @@ export class ManageSieveClient {
     }
   }
 
-  /** Read a full server response: untagged lines (and literals) until a
-   *  tagged OK/NO/BYE line. */
+  /** Read a full server response: untagged lines until a tagged OK/NO/BYE
+   *  line. A leading synchronised literal ({N}) — LISTSCRIPTS names,
+   *  GETSCRIPT content (RFC 5804 §2.7/§2.9) — means the N bytes continue
+   *  THIS line as data; they are never classified as a tagged result, so a
+   *  script named "OK" or "NO" cannot corrupt the response stream. */
   private async readTagged(): Promise<SieveResult> {
     const untagged: string[] = [];
     for (;;) {
-      const line = await this.readAssembledLine();
+      const line = await this.readLine();
+      const literal = /^\{(\d+)\}$/.exec(line);
+      if (literal) {
+        const bytes = await this.readLiteralBytes(Number(literal[1]));
+        untagged.push(bytes + (await this.readLine()));
+        continue;
+      }
       if (isSieveBye(line)) {
         this.destroy();
         throw new Error(`ManageSieve server sent BYE: ${sieveTaggedMessage(line.slice(4).trim())}`);
@@ -290,18 +306,6 @@ export class ManageSieveClient {
       }
       untagged.push(line);
     }
-  }
-
-  /** Read one line, resolving a leading synchronised literal ({N} CRLF
-   *  bytes) back into the line. RFC 5804 §2.7/§2.9: LISTSCRIPTS names and
-   *  GETSCRIPT content arrive this way — the N bytes continue the same
-   *  logical line (no CRLF is consumed after them). */
-  private async readAssembledLine(): Promise<string> {
-    const first = await this.readLine();
-    const m = /^\{(\d+)\}$/.exec(first);
-    if (!m) return first;
-    const bytes = await this.readLiteralBytes(Number(m[1]));
-    return bytes + (await this.readLine());
   }
 
   /** Read exactly n raw bytes (synchronised literal content). */
@@ -349,12 +353,11 @@ export class ManageSieveClient {
     this.socket.write(data);
   }
 
-  /** Read the server greeting (untagged capability lines + OK). */
+  /** Read the server greeting: capability lines + OK. RFC 5804 §2.2 — the
+   *  greeting REPLACES cached capabilities (fresh list after STARTTLS). */
   private async readGreeting(): Promise<void> {
     const res = await this.readTagged();
-    for (const line of res.untagged) {
-      this.capabilities.push(...parseCapabilityLine(line));
-    }
+    this.capabilities = res.untagged.flatMap((line) => parseCapabilityLine(line));
   }
 
   /** CAPABILITY command; merges the advertised capabilities. */

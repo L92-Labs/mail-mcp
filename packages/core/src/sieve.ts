@@ -26,7 +26,6 @@ export function unescapeSieveString(value: string): string {
 export function parseListScriptsEntry(line: string): SieveScriptSummary | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
-  if (/^(OK|NO|BYE)\b/i.test(trimmed)) return null; // tagged line, not an entry
   const activeMatch = /\s+ACTIVE$/i.exec(trimmed);
   const active = activeMatch !== null;
   const bare = activeMatch ? trimmed.slice(0, activeMatch.index) : trimmed;
@@ -38,20 +37,22 @@ export function parseListScriptsEntry(line: string): SieveScriptSummary | null {
     return { name: unescapeSieveString(quoted[1]), active };
   }
   // Bare form: the client assembled the raw bytes of a synchronised-literal
-  // name back into the line — the name is exactly those bytes.
+  // name into the line — the name is exactly those bytes, even when it
+  // starts with OK/NO/BYE (the response reader keeps literal data out of
+  // status classification).
   return { name: bare, active };
 }
 
-/** Parse a CAPABILITY untagged line into capability tokens (quoted or bare). */
+/** Parse a CAPABILITY response line into capability tokens. ManageSieve
+ *  capability lines are quoted-token lists ("SIEVE" "fileinto ...") with
+ *  no "* CAPABILITY" prefix; a bare-token fallback (stripping that prefix
+ *  when present) covers non-compliant servers. */
 export function parseCapabilityLine(line: string): string[] {
   const out: string[] = [];
   for (const m of line.matchAll(/"((?:[^"\\]|\\.)*)"/g)) out.push(unescapeSieveString(m[1]));
-  if (out.length === 0) {
-    // Bare-token form: * CAPABILITY SIEVE FILEINTO ...
-    for (const tok of line.split(/\s+/).slice(2)) if (tok) out.push(tok);
-  } else if (out[0].toUpperCase() !== "CAPABILITY") {
-    out.unshift("CAPABILITY");
-  }
+  if (out.length > 0) return out;
+  const tokens = line.replace(/^\*\s+CAPABILITY\b/i, "").split(/\s+/);
+  for (const tok of tokens) if (tok) out.push(tok);
   return out;
 }
 

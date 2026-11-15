@@ -25,19 +25,26 @@ describe("sieve wire helpers", () => {
       active: true,
     });
     expect(parseListScriptsEntry('"vacation"')).toEqual({ name: "vacation", active: false });
-    expect(parseListScriptsEntry("OK done")).toBeNull();
+    // Literal-assembled names may start with OK/NO/BYE — the response reader
+    // keeps literal data out of status classification, so the parser treats
+    // bare lines as names unconditionally.
+    expect(parseListScriptsEntry("OK done")).toEqual({ name: "OK done", active: false });
   });
 
   it("parses CAPABILITY lines (quoted and bare)", () => {
     // Quoted form: capabilities are quoted; bare CAPABILITY token added when
     // the first token isn't already CAPABILITY.
-    expect(parseCapabilityLine('* CAPABILITY "SIEVE" "FILEINTO" "VACATION"')).toEqual([
-      "CAPABILITY",
-      "SIEVE",
-      "FILEINTO",
-      "VACATION",
+    // ManageSieve capability lines are quoted-token lists WITHOUT a
+    // "* CAPABILITY" prefix (RFC 5804 §1.7) — tokens only.
+    expect(parseCapabilityLine('"IMPLEMENTATION" "Dovecot (Debian) Pigeonhole"')).toEqual([
+      "IMPLEMENTATION",
+      "Dovecot (Debian) Pigeonhole",
     ]);
-    // Bare form: raw tokens after "* CAPABILITY" (no synthetic CAPABILITY).
+    expect(parseCapabilityLine('"SIEVE" "fileinto vacation"')).toEqual([
+      "SIEVE",
+      "fileinto vacation",
+    ]);
+    // Bare fallback: raw tokens, with a leading "* CAPABILITY" stripped.
     expect(parseCapabilityLine("* CAPABILITY SIEVE FILEINTO")).toEqual([
       "SIEVE",
       "FILEINTO",

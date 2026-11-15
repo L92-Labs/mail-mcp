@@ -1,14 +1,26 @@
+import fs from "node:fs";
 import net from "node:net";
+import tls from "node:tls";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ManageSieveClient } from "../apps/node/src/managesieve-client.js";
 
+const TLS_KEY = fs.readFileSync(new URL("./fixtures/managesieve-tls.key", import.meta.url), "utf8");
+const TLS_CERT = fs.readFileSync(new URL("./fixtures/managesieve-tls.crt", import.meta.url), "utf8");
+const SECURE_CONTEXT = tls.createSecureContext({ key: TLS_KEY, cert: TLS_CERT });
+const TEST_ACCOUNT = { imap: { user: "me@loiu92.com", password: "pw" } } as never;
+
 /** Minimal in-process ManageSieve server (RFC 5804 subset) for protocol
- *  tests. Handles commands with non-synchronised literal bodies ({N+} →
- *  N raw bytes follow the command line). Records every exchange. */
+ *  tests. Modes: plain, implicit-tls, starttls. Handles commands with
+ *  non-synchronised literal bodies ({N+} → N raw bytes follow the command
+ *  line). Records every exchange. */
 class FakeManageSieveServer {
-  private server: net.Server;
+  private server?: net.Server | tls.Server;
   private buffer = "";
   readonly received: string[] = [];
+  /** True once a STARTTLS upgrade completed on the current connection. */
+  upgraded = false;
+  /** Override for the LISTSCRIPTS response (raw wire text). */
+  listScriptsResponse: string | null = null;
   /** Fail the current PUTSCRIPT/CHECKSCRIPT when the literal body contains
    *  this marker (simulates a server-side compile error for CHECKSCRIPT). */
   invalidMarker = "";
@@ -17,16 +29,25 @@ class FakeManageSieveServer {
   /** PUTSCRIPT replies with a WARNINGS response code. */
   warningsOnPut = false;
 
-  constructor() {
-    this.server = net.createServer((socket) => {
-      socket.write(
-        '"IMPLEMENTATION" "Test Server"\r\n"SIEVE" "FILEINTO" "VACATION"\r\n"VERSION" "1.0"\r\nOK "ready"\r\n',
-      );
-      socket.on("data", (chunk: Buffer) => {
-        this.buffer += chunk.toString("utf8");
-        this.processBuffer(socket);
-      });
-      socket.on("error", () => {});
+  constructor(private readonly mode: "plain" | "implicit-tls" | "starttls" = "plain") {}
+
+  /** RFC 5804 §1.7 greeting; after a STARTTLS upgrade the fresh list drops
+   *  STARTTLS (§2.2) — mirrored from real Dovecot behaviour. */
+  private greeting(): string {
+    const lines = [
+      '"IMPLEMENTATION" "Test Server"',
+      ...(this.mode === "starttls" && !this.upgraded ? ['"STARTTLS"'] : []),
+      '"SIEVE" "FILEINTO"',
+      '"VERSION" "1.0"',
+    ];
+    return lines.join("\r\n") + '\r\nOK "ready"\r\n';
+  }
+
+  private attach(socket: net.Socket): void {
+    socket.write(this.greeting());
+    socket.on("data", (chunk: Buffer) => {
+      this.buffer += chunk.toString("utf8");
+      this.processBuffer(socket);
     });
   }
 
@@ -48,13 +69,24 @@ class FakeManageSieveServer {
       }
       this.buffer = this.buffer.slice(lineEnd + 2);
       this.received.push(line);
+      if (line === "STARTTLS" && this.mode === "starttls" && !this.upgraded) {
+        // RFC 5804 §2.2: OK, then the handshake begins; afterwards the
+        // server re-issues its capability greeting.
+        socket.write('OK "Begin TLS negotiation now."\r\n');
+        socket.removeAllListeners("data");
+        this.buffer = "";
+        const secure = new tls.TLSSocket(socket, { isServer: true, secureContext: SECURE_CONTEXT });
+        this.upgraded = true;
+        this.attach(secure);
+        return;
+      }
       this.respond(socket, line);
     }
   }
 
   private respond(socket: net.Socket, line: string): void {
     if (line.startsWith("CAPABILITY")) {
-      socket.write('"IMPLEMENTATION" "Test Server"\r\n"SIEVE" "FILEINTO" "VACATION"\r\n"VERSION" "1.0"\r\nOK\r\n');
+      socket.write(this.greeting());
       return;
     }
     if (line.startsWith("AUTHENTICATE")) {
@@ -62,7 +94,9 @@ class FakeManageSieveServer {
       return;
     }
     if (line.startsWith("LISTSCRIPTS")) {
-      if (this.literalListName) {
+      if (this.listScriptsResponse !== null) {
+        socket.write(this.listScriptsResponse);
+      } else if (this.literalListName) {
         // RFC 5804 §2.7: names with special chars arrive as synchronised
         // literals — {N} CRLF name-bytes continue the same line.
         const name = 'cle"ver';
@@ -109,21 +143,26 @@ class FakeManageSieveServer {
   }
 
   listen(): Promise<number> {
+    if (this.mode === "implicit-tls") {
+      this.server = tls.createServer({ key: TLS_KEY, cert: TLS_CERT }, (s) => this.attach(s));
+    } else {
+      this.server = net.createServer((s) => this.attach(s));
+    }
     return new Promise((resolve) => {
-      this.server.listen(0, "127.0.0.1", () => {
-        resolve((this.server.address() as net.AddressInfo).port);
+      this.server!.listen(0, "127.0.0.1", () => {
+        resolve((this.server!.address() as net.AddressInfo).port);
       });
     });
   }
 
   close(): void {
-    this.server.close();
+    this.server?.close();
   }
 }
 
-describe("ManageSieveClient (fake server)", { timeout: 15_000 }, () => {
+describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
+  const server = new FakeManageSieveServer("plain");
   let port = 0;
-  const server = new FakeManageSieveServer();
   let client: ManageSieveClient;
 
   beforeAll(async () => {
@@ -131,21 +170,13 @@ describe("ManageSieveClient (fake server)", { timeout: 15_000 }, () => {
     expect(port).toBeGreaterThan(0);
     client = await ManageSieveClient.connect(
       { host: "127.0.0.1", port, secure: "plain" },
-      { imap: { user: "me@loiu92.com", password: "pw" } } as never,
+      TEST_ACCOUNT,
     );
     // RFC 5804 §1.7: greeting/capability lines are bare quoted-token lists
     // with NO "CAPABILITY" substring — a substring-gated parser would see
     // nothing at all (real Dovecot behaves exactly like this).
     expect(client.capabilities).toEqual(
-      expect.arrayContaining([
-        "IMPLEMENTATION",
-        "Test Server",
-        "SIEVE",
-        "FILEINTO",
-        "VACATION",
-        "VERSION",
-        "1.0",
-      ]),
+      expect.arrayContaining(["IMPLEMENTATION", "Test Server", "SIEVE", "FILEINTO", "VERSION", "1.0"]),
     );
   });
 
@@ -227,5 +258,91 @@ describe("ManageSieveClient (fake server)", { timeout: 15_000 }, () => {
 
   it("LOGOUT closes the connection", async () => {
     await client.close();
+  });
+});
+
+describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_000 }, () => {
+  const server = new FakeManageSieveServer("starttls");
+
+  it("sends STARTTLS first, consumes the re-issued greeting, then works", async () => {
+    const port = await server.listen();
+    const client = await ManageSieveClient.connect(
+      { host: "127.0.0.1", port, secure: "starttls" },
+      TEST_ACCOUNT,
+      false, // self-signed test fixture
+    );
+    // The command went out in plaintext BEFORE the TLS handshake started.
+    expect(server.received).toContain("STARTTLS");
+    expect(server.upgraded).toBe(true);
+    // §2.2: cached capabilities are REPLACED by the post-handshake greeting,
+    // which must NOT advertise STARTTLS any more.
+    expect(client.capabilities).not.toContain("STARTTLS");
+    expect(client.capabilities).toEqual(
+      expect.arrayContaining(["IMPLEMENTATION", "Test Server", "SIEVE", "VERSION", "1.0"]),
+    );
+    // Command/response alignment after the upgrade.
+    const scripts = await client.listScripts();
+    expect(scripts).toEqual([
+      { name: "active", active: true },
+      { name: "vacation", active: false },
+    ]);
+    await client.close();
+    server.close();
+  });
+});
+
+describe("ManageSieveClient implicit TLS (RFC 5804 §1.8)", { timeout: 15_000 }, () => {
+  const server = new FakeManageSieveServer("implicit-tls");
+
+  it("consumes the TLS greeting before sending commands", async () => {
+    const port = await server.listen();
+    const client = await ManageSieveClient.connect(
+      { host: "127.0.0.1", port, secure: "tls" },
+      TEST_ACCOUNT,
+      false, // self-signed test fixture
+    );
+    // If the greeting had not been consumed, AUTHENTICATE's response would
+    // be read by LISTSCRIPTS and the list would come back empty.
+    expect(server.received.some((l) => l.startsWith("AUTHENTICATE"))).toBe(true);
+    const scripts = await client.listScripts();
+    expect(scripts).toEqual([
+      { name: "active", active: true },
+      { name: "vacation", active: false },
+    ]);
+    await client.close();
+    server.close();
+  });
+});
+
+describe("ManageSieveClient literal-name safety", { timeout: 15_000 }, () => {
+  it("a script named NO arrives as data, not as a refusal", async () => {
+    const server = new FakeManageSieveServer("plain");
+    const port = await server.listen();
+    const client = await ManageSieveClient.connect(
+      { host: "127.0.0.1", port, secure: "plain" },
+      TEST_ACCOUNT,
+    );
+    server.listScriptsResponse = '{2}\r\nNO\r\nOK "listed"\r\n';
+    const scripts = await client.listScripts();
+    expect(scripts).toEqual([{ name: "NO", active: false }]);
+    await client.close();
+    // The dialogue stayed aligned end-to-end: LOGOUT's OK was the final
+    // exchange, with no stale response left pending in the buffer.
+    expect(server.received[server.received.length - 1]).toBe("LOGOUT");
+    server.close();
+  });
+
+  it("a script named OK arrives as data, not as a completion", async () => {
+    const server = new FakeManageSieveServer("plain");
+    const port = await server.listen();
+    const client = await ManageSieveClient.connect(
+      { host: "127.0.0.1", port, secure: "plain" },
+      TEST_ACCOUNT,
+    );
+    server.listScriptsResponse = '{2}\r\nOK\r\nOK\r\n';
+    const scripts = await client.listScripts();
+    expect(scripts).toEqual([{ name: "OK", active: false }]);
+    await client.close();
+    server.close();
   });
 });
