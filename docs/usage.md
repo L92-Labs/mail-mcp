@@ -70,6 +70,40 @@ Trash, Archive, Junk) are always refused:
 {"account_name":"work","path":"Receipts","confirm":true}
 ```
 
+## Sieve filter scripts
+
+If `SIEVE_HOST` is configured, six `sieve_*` tools manage the account's mail
+filter scripts over ManageSieve (RFC 5804), authenticating with the same IMAP
+credentials. Convention: one primary script named `active`.
+
+List what's stored and which script is live:
+
+```json
+{"account_name":"work"}
+```
+
+Validate source without saving — the server's parser reports errors with line
+numbers:
+
+```json
+{"account_name":"work","content":"require [\"fileinto\"];# rule: receipts\nif header :contains [\"from\"] [\"receipts@\"] { fileinto :create \"INBOX/Receipts\"; stop; }"}
+```
+
+Save (validation runs first; an invalid script is reported and **not** saved)
+and then activate it:
+
+```json
+{"account_name":"work","name":"active","content":"…"}
+{"account_name":"work","name":"active"}
+```
+
+Delete needs `confirm: true`; the currently active script is refused until you
+activate another one:
+
+```json
+{"account_name":"work","name":"old-rules","confirm":true}
+```
+
 ## Draft, reply and send
 
 Start with `MAIL_MODE=draft`. `email_draft` can create a new message or a threaded

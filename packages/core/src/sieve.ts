@@ -16,13 +16,21 @@ export function unescapeSieveString(value: string): string {
  *  for non-data lines. */
 export function parseListScriptsEntry(line: string): SieveScriptSummary | null {
   const trimmed = line.trim();
-  if (!trimmed.startsWith('"')) return null;
-  const active = /\bACTIVE\b/i.test(trimmed);
-  const quoted = /^"((?:[^"\\]|\\.)*)"/.exec(trimmed);
-  if (quoted) return { name: unescapeSieveString(quoted[1]), active };
-  const literal = /^\{(\d+)\}\s*$/.exec(trimmed);
-  if (!literal) return null;
-  return { name: `@literal:${literal[1]}@`, active };
+  if (!trimmed) return null;
+  if (/^(OK|NO|BYE)\b/i.test(trimmed)) return null; // tagged line, not an entry
+  const activeMatch = /\s+ACTIVE$/i.exec(trimmed);
+  const active = activeMatch !== null;
+  const bare = activeMatch ? trimmed.slice(0, activeMatch.index) : trimmed;
+  if (!bare) return null;
+  if (bare.startsWith('"')) {
+    // Quoted form: RFC 5804 §2.7 `"name" [ACTIVE]`.
+    const quoted = /^"((?:[^"\\]|\\.)*)"$/.exec(bare);
+    if (!quoted) return null;
+    return { name: unescapeSieveString(quoted[1]), active };
+  }
+  // Bare form: the client assembled the raw bytes of a synchronised-literal
+  // name back into the line — the name is exactly those bytes.
+  return { name: bare, active };
 }
 
 /** Parse a CAPABILITY untagged line into capability tokens (quoted or bare). */

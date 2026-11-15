@@ -198,7 +198,8 @@ export const TOOL_META: ToolMeta[] = [
   {
     name: "sieve_script_get",
     title: "Read Sieve script",
-    description: "Read a Sieve script's full source. Defaults to the active script.",
+    description:
+      "Read a Sieve script's full source by exact name (use sieve_scripts_list for stored names and which one is active).",
     inputSchema: sieveScriptGetSchema,
     readOnly: true,
     sieveOnly: true,
@@ -207,7 +208,7 @@ export const TOOL_META: ToolMeta[] = [
     name: "sieve_script_put",
     title: "Save Sieve script",
     description:
-      "Save a Sieve script (RFC 5222). Server-side validation (CHECKSCRIPT) runs first; invalid scripts are reported and NOT saved. Defaults to the active script.",
+      "Save a Sieve script under `name` (convention: `active` for the account's primary script). Server-side validation (CHECKSCRIPT) runs first unless validate is false; invalid scripts are reported and NOT saved.",
     inputSchema: sieveScriptPutSchema,
     readOnly: false,
     sieveOnly: true,
@@ -739,8 +740,8 @@ export async function dispatchTool(
           throw new Error(`Sieve script is invalid — not saved: ${check.errors ?? "syntax error"}`);
         }
       }
-      await sieve.putScript(account, parsed.name, parsed.content);
-      return { saved: true, name: parsed.name };
+      const warnings = await sieve.putScript(account, parsed.name, parsed.content);
+      return { saved: true, name: parsed.name, ...(warnings ? { warnings } : {}) };
     }
 
     case "sieve_script_check": {

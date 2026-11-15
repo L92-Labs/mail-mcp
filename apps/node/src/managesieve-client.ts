@@ -9,13 +9,13 @@ import type {
 } from "@mail-mcp/core";
 import {
   isSieveBye,
-  isSieveLiteral,
   isSieveNo,
   isSieveOk,
   parseCapabilityLine,
   parseListScriptsEntry,
   quoteSieveString,
   sieveTaggedMessage,
+  unescapeSieveString,
 } from "@mail-mcp/core";
 
 const INACTIVITY_TIMEOUT_MS = 20_000;
@@ -23,7 +23,27 @@ const INACTIVITY_TIMEOUT_MS = 20_000;
 /** A single ManageSieve command exchange: untagged lines + tagged result. */
 interface SieveResult {
   untagged: string[];
+  /** The raw tagged line (e.g. `OK "done"`) — apply isSieveOk/isSieveNo. */
   tagged: string;
+  /** Human-readable text extracted from the tagged line. */
+  message: string;
+}
+
+/** Names that need the non-synchronised literal form on the wire: quotes,
+ *  backslashes, CR/LF or other control characters would break the quoted
+ *  form (CR/LF = line injection). */
+function needsLiteralForm(name: string): boolean {
+  return /["\\\r\n\x00-\x1f\x7f]/.test(name);
+}
+
+/** A command segment: wire text (command word, quoted string) or a Buffer,
+ *  which is sent as a non-synchronised literal argument ({N+} CRLF bytes). */
+type CmdPart = string | Buffer;
+
+/** Render a script name argument: quoted when safe, literal otherwise. */
+function namePart(name: string): CmdPart {
+  if (!needsLiteralForm(name)) return quoteSieveString(name);
+  return Buffer.from(name, "utf8");
 }
 
 /** RFC 5804 ManageSieve client (Node runtime). Plain connect → STARTTLS →
@@ -42,6 +62,7 @@ export class ManageSieveClient {
   private constructor(socket: net.Socket | tls.TLSSocket, host: string) {
     this.socket = socket;
     this.host = host;
+    this.attach();
   }
 
   /** Connect, STARTTLS (if configured and advertised), AUTHENTICATE PLAIN
@@ -51,28 +72,32 @@ export class ManageSieveClient {
     account: EmailAccount,
     tlsVerify = true,
   ): Promise<ManageSieveClient> {
-    const client = new ManageSieveClient(
-      net.createConnection({ host: config.host, port: config.port }),
-      config.host,
-    );
-    await client.waitConnected();
-    client.attach();
-    await client.readGreeting();
+    let client: ManageSieveClient;
     if (config.secure === "tls") {
-      await client.upgradeTls(tlsVerify);
-    }
-    const caps = await client.capability();
-    if (config.secure === "starttls") {
-      if (!caps.some((c) => c.toUpperCase() === "STARTTLS")) {
-        await client.close();
-        throw new Error(
-          `ManageSieve server ${config.host}:${config.port} does not advertise STARTTLS`,
-        );
+      // Implicit TLS: encrypt BEFORE reading the greeting (a plaintext
+      // connect would deadlock — the server waits for a ClientHello).
+      const secure = tls.connect({ host: config.host, port: config.port, rejectUnauthorized: tlsVerify });
+      client = new ManageSieveClient(secure, config.host);
+      await client.waitConnected();
+    } else {
+      client = new ManageSieveClient(
+        net.createConnection({ host: config.host, port: config.port }),
+        config.host,
+      );
+      await client.waitConnected();
+      await client.readGreeting();
+      if (config.secure === "starttls") {
+        const caps = await client.capability();
+        if (!caps.some((c) => c.toUpperCase() === "STARTTLS")) {
+          await client.close();
+          throw new Error(
+            `ManageSieve server ${config.host}:${config.port} does not advertise STARTTLS`,
+          );
+        }
+        await client.startTls(tlsVerify);
       }
-      await client.command("STARTTLS");
-      await client.upgradeTls(tlsVerify);
-      await client.capability(); // refresh post-TLS capabilities
     }
+    await client.capability(); // refresh capabilities (post-TLS where applicable)
     if (!client.capabilities.some((c) => c.toUpperCase() === "SIEVE")) {
       await client.close();
       throw new Error(
@@ -94,41 +119,50 @@ export class ManageSieveClient {
     const out: SieveScriptSummary[] = [];
     for (const line of res.untagged) {
       const entry = parseListScriptsEntry(line);
-      if (entry && entry.name !== "@literal:@") out.push(entry);
+      if (entry) out.push(entry);
     }
     return out;
   }
 
   async getScript(name: string): Promise<string> {
-    const res = await this.command(`GETSCRIPT ${quoteSieveString(name)}`);
-    const literal = res.untagged.map(isSieveLiteral).find(Boolean);
-    if (!literal) throw new Error(`script "${name}" is empty or the server sent no content`);
-    return await this.readLiteralRaw(literal.size);
+    const res = await this.command("GETSCRIPT ", namePart(name));
+    // RFC 5804 §2.9: the script arrives as a literal; readTagged has already
+    // decoded the bytes into untagged[0].
+    return res.untagged[0] ?? "";
   }
 
-  async putScript(name: string, content: string): Promise<void> {
-    const bytes = Buffer.from(content, "utf8");
-    await this.sendBytes(`PUTSCRIPT ${quoteSieveString(name)} {${bytes.length}+}\r\n`, bytes);
-    await this.readTagged();
+  async putScript(name: string, content: string): Promise<string | undefined> {
+    // RFC 5804 §2.6: the script content is the final argument, sent as a
+    // non-synchronised literal {N+} — multi-line scripts would otherwise
+    // inject CRLFs into the command stream.
+    const res = await this.command(
+      "PUTSCRIPT ",
+      namePart(name),
+      " ",
+      Buffer.from(content, "utf8"),
+    );
+    if (isSieveNo(res.tagged)) throw new Error(`PUTSCRIPT refused: ${res.message}`);
+    // RFC 5804 §2.6: OK may carry a WARNINGS response code — surface it.
+    const warnings = /\(WARNINGS\s+"((?:[^"\\]|\\.)*)"\)/i.exec(res.tagged);
+    return warnings ? unescapeSieveString(warnings[1]) : undefined;
   }
 
   async checkScript(content: string): Promise<SieveCheckResult> {
-    const bytes = Buffer.from(content, "utf8");
-    try {
-      await this.sendBytes(`CHECKSCRIPT {${bytes.length}+}\r\n`, bytes);
-      await this.readTagged();
-      return { valid: true };
-    } catch (err) {
-      return { valid: false, errors: err instanceof Error ? err.message : String(err) };
-    }
+    // sendParts, not command(): a NO here is the expected "invalid script"
+    // outcome, not a transport error to throw.
+    const res = await this.sendParts(["CHECKSCRIPT ", Buffer.from(content, "utf8")]);
+    if (isSieveNo(res.tagged)) return { valid: false, errors: res.message };
+    return { valid: true };
   }
 
   async setActive(name: string): Promise<void> {
-    await this.command(`SETACTIVE ${quoteSieveString(name)}`);
+    const res = await this.command("SETACTIVE ", namePart(name));
+    if (isSieveNo(res.tagged)) throw new Error(`SETACTIVE refused: ${res.message}`);
   }
 
   async deleteScript(name: string): Promise<void> {
-    await this.command(`DELETESCRIPT ${quoteSieveString(name)}`);
+    const res = await this.command("DELETESCRIPT ", namePart(name));
+    if (isSieveNo(res.tagged)) throw new Error(`DELETESCRIPT refused: ${res.message}`);
   }
 
   /** LOGOUT and close. */
@@ -149,6 +183,13 @@ export class ManageSieveClient {
   // ---------- protocol mechanics ----------
 
   private attach(): void {
+    this.socket.setNoDelay(true);
+    this.socket.setTimeout(INACTIVITY_TIMEOUT_MS);
+    this.socket.on("timeout", () => {
+      this.lastError = new Error(`inactivity timeout after ${INACTIVITY_TIMEOUT_MS}ms`);
+      this.destroy();
+      this.readResolver?.();
+    });
     this.socket.on("data", (chunk: Buffer) => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
       this.readResolver?.();
@@ -180,19 +221,21 @@ export class ManageSieveClient {
     });
   }
 
-  private upgradeTls(rejectUnauthorized: boolean): Promise<void> {
+  /** Upgrade the plain socket to TLS (STARTTLS), re-attaching listeners. */
+  private startTls(tlsVerify: boolean): Promise<void> {
     const host = this.host;
     const plain = this.socket;
+    plain.setTimeout(0);
+    plain.removeAllListeners("timeout");
     plain.removeAllListeners("data");
     plain.removeAllListeners("error");
     plain.removeAllListeners("close");
-    plain.setTimeout(0);
+    this.buffer = Buffer.alloc(0);
     return new Promise((resolve, reject) => {
       const secure = tls.connect(
-        { socket: plain, servername: host, rejectUnauthorized },
+        { socket: plain, servername: host, rejectUnauthorized: tlsVerify },
         () => {
           this.socket = secure;
-          this.buffer = Buffer.alloc(0);
           this.attach();
           resolve();
         },
@@ -211,7 +254,7 @@ export class ManageSieveClient {
         reject(
           this.lastError
             ? new Error(`connection closed: ${this.lastError.message}`)
-            : new Error("connection closed"),
+            : new Error("connection closed by server"),
         );
       }
     });
@@ -236,34 +279,37 @@ export class ManageSieveClient {
   private async readTagged(): Promise<SieveResult> {
     const untagged: string[] = [];
     for (;;) {
-      const line = await this.readLine();
-      const literal = isSieveLiteral(line);
-      if (literal) {
-        // Server literal: N bytes followed by CRLF (part of the next line).
-        const content = await this.readLiteralRaw(literal.size);
-        untagged.push(content);
-        continue;
-      }
+      const line = await this.readAssembledLine();
       if (isSieveBye(line)) {
         this.destroy();
         throw new Error(`ManageSieve server sent BYE: ${sieveTaggedMessage(line.slice(4).trim())}`);
       }
       if (isSieveOk(line) || isSieveNo(line)) {
-        const message = line.trim().split(/\s+(.*)$/s)[1] ?? "";
-        return { untagged, tagged: sieveTaggedMessage(message) };
+        const rest = line.trim().split(/\s+(.*)$/s)[1] ?? "";
+        return { untagged, tagged: line.trim(), message: sieveTaggedMessage(rest) };
       }
       untagged.push(line);
     }
   }
 
-  /** Read exactly n raw bytes then a CRLF (server-to-client literal). */
-  private async readLiteralRaw(size: number): Promise<string> {
+  /** Read one line, resolving a leading synchronised literal ({N} CRLF
+   *  bytes) back into the line. RFC 5804 §2.7/§2.9: LISTSCRIPTS names and
+   *  GETSCRIPT content arrive this way — the N bytes continue the same
+   *  logical line (no CRLF is consumed after them). */
+  private async readAssembledLine(): Promise<string> {
+    const first = await this.readLine();
+    const m = /^\{(\d+)\}$/.exec(first);
+    if (!m) return first;
+    const bytes = await this.readLiteralBytes(Number(m[1]));
+    return bytes + (await this.readLine());
+  }
+
+  /** Read exactly n raw bytes (synchronised literal content). */
+  private async readLiteralBytes(size: number): Promise<string> {
     for (;;) {
       if (this.buffer.length >= size) {
         const content = this.buffer.subarray(0, size).toString("utf8");
         this.buffer = this.buffer.subarray(size);
-        // swallow trailing CRLF
-        if (this.buffer.subarray(0, 2).toString() === "\r\n") this.buffer = this.buffer.subarray(2);
         return content;
       }
       if (this.closed) throw new Error("connection closed while reading literal");
@@ -271,25 +317,31 @@ export class ManageSieveClient {
     }
   }
 
-  /** Send a command line and return the tagged result. Throws on NO/BYE. */
-  private async command(line: string): Promise<SieveResult> {
-    const res = await this.sendLineGetResult(line);
-    if (isSieveNo(res.tagged)) {
-      throw new Error(`ManageSieve server refused: ${res.tagged}`);
+  /** Send a command (wire-text parts + literal-argument Buffers) and return
+   *  the tagged result. A trailing CRLF closes the command line unless the
+   *  command ENDS with a literal — a literal body is self-terminating
+   *  (RFC 5804 §1.6: the {N+} CRLF bytes form is never followed by CRLF). */
+  private async sendParts(parts: CmdPart[]): Promise<SieveResult> {
+    const last = parts[parts.length - 1];
+    for (const part of parts) {
+      if (typeof part === "string") {
+        this.write(part);
+      } else {
+        this.write(`{${part.length}+}\r\n`);
+        this.write(part);
+      }
     }
-    return res;
-  }
-
-  private async sendLineGetResult(line: string): Promise<SieveResult> {
-    this.write(`${line}\r\n`);
+    if (typeof last === "string") this.write("\r\n");
     return this.readTagged();
   }
 
-  /** Send a command prefix + a non-synchronised literal body. */
-  private async sendBytes(prefix: string, bytes: Buffer): Promise<void> {
-    this.write(prefix);
-    this.write(bytes);
-    await this.readTagged();
+  /** Send a command and return the tagged result. Throws on NO. */
+  private async command(...parts: CmdPart[]): Promise<SieveResult> {
+    const res = await this.sendParts(parts);
+    if (isSieveNo(res.tagged)) {
+      throw new Error(`ManageSieve server refused: ${res.message || res.tagged}`);
+    }
+    return res;
   }
 
   private write(data: string | Buffer): void {
@@ -297,23 +349,19 @@ export class ManageSieveClient {
     this.socket.write(data);
   }
 
-  /** Read the server greeting (untagged CAPABILITY line + OK). */
+  /** Read the server greeting (untagged capability lines + OK). */
   private async readGreeting(): Promise<void> {
     const res = await this.readTagged();
     for (const line of res.untagged) {
-      if (line.toUpperCase().includes("CAPABILITY")) {
-        this.capabilities = parseCapabilityLine(line);
-      }
+      this.capabilities.push(...parseCapabilityLine(line));
     }
   }
 
-  /** CAPABILITY command; stores the advertised capabilities. */
+  /** CAPABILITY command; merges the advertised capabilities. */
   async capability(): Promise<string[]> {
     const res = await this.command("CAPABILITY");
     for (const line of res.untagged) {
-      if (line.toUpperCase().includes("CAPABILITY")) {
-        this.capabilities = parseCapabilityLine(line);
-      }
+      this.capabilities.push(...parseCapabilityLine(line));
     }
     return this.capabilities;
   }
@@ -360,7 +408,7 @@ export class ManageSieveBackend implements SieveBackend {
     return this.withConnection(account, (client) => client.getScript(name));
   }
 
-  async putScript(account: EmailAccount, name: string, content: string): Promise<void> {
+  async putScript(account: EmailAccount, name: string, content: string): Promise<string | undefined> {
     return this.withConnection(account, (client) => client.putScript(name, content));
   }
 

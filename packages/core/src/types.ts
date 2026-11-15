@@ -64,7 +64,9 @@ export interface SieveBackend {
   capabilities(account: EmailAccount): Promise<string[]>;
   listScripts(account: EmailAccount): Promise<SieveScriptSummary[]>;
   getScript(account: EmailAccount, name: string): Promise<string>;
-  putScript(account: EmailAccount, name: string, content: string): Promise<void>;
+  /** Saves the script; returns the server's WARNINGS text when the OK line
+   *  carried a WARNINGS response code (RFC 5804 §2.6), else undefined. */
+  putScript(account: EmailAccount, name: string, content: string): Promise<string | undefined>;
   checkScript(account: EmailAccount, content: string): Promise<SieveCheckResult>;
   setActive(account: EmailAccount, name: string): Promise<void>;
   deleteScript(account: EmailAccount, name: string): Promise<void>;
