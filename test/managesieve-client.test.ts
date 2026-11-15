@@ -463,7 +463,11 @@ describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_00
     // sends SNI, and the callback must observe it. Without this arm a dead
     // capture mechanism (like the earlier 'data' spy) would let the IP pin
     // above pass vacuously.
+    // literalCapName additionally exercises the post-STARTTLS greeting
+    // REPLACEMENT path (§2.2) with a literal capability name — connect must
+    // succeed and the replaced list must contain SIEVE.
     const server = new FakeManageSieveServer("starttls");
+    server.literalCapName = true;
     const port = await server.listen();
     let client: ManageSieveClient | null = null;
     try {
@@ -473,6 +477,9 @@ describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_00
         false, // self-signed test fixture
       );
       expect(server.helloSni).toBe("localhost");
+      expect(client.capabilities).not.toContain("STARTTLS");
+      expect(client.capabilities).toContain("SIEVE");
+      expect(client.capabilities).toContain("fileinto");
     } finally {
       await client?.close().catch(() => client!.destroy());
       server.close();
