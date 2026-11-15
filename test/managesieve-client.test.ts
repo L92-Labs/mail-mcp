@@ -39,8 +39,12 @@ class FakeManageSieveServer {
   multilineCheckError = false;
   /** AUTHENTICATE is refused with NO (connection stays open server-side). */
   rejectAuth = false;
+  /** STARTTLS is refused with NO (connection stays open server-side). */
+  rejectStarttls = false;
   /** True once the current connection's socket closed. */
   socketClosed = false;
+  /** The raw ClientHello bytes seen on the STARTTLS upgrade (latin1). */
+  helloProbe = "";
   /** CHECKSCRIPT replies NO whose literal message ends in "{N}". */
   messageEndsWithBrace = false;
 
@@ -88,10 +92,20 @@ class FakeManageSieveServer {
       this.buffer = this.buffer.slice(lineEnd + 2);
       this.received.push(line);
       if (line === "STARTTLS" && this.mode === "starttls" && !this.upgraded) {
+        if (this.rejectStarttls) {
+          socket.write('NO "TLS not available"\r\n');
+          return;
+        }
         // RFC 5804 §2.2: OK, then the handshake begins; afterwards the
         // server re-issues its capability greeting.
         socket.write('OK "Begin TLS negotiation now."\r\n');
         socket.removeAllListeners("data");
+        // Spy on the ClientHello (SNI inspection) without consuming it —
+        // 'data' listeners broadcast, so the TLSSocket still reads its bytes.
+        this.helloProbe = "";
+        socket.on("data", (chunk: Buffer) => {
+          this.helloProbe += chunk.toString("latin1");
+        });
         this.buffer = "";
         const secure = new tls.TLSSocket(socket, { isServer: true, secureContext: SECURE_CONTEXT });
         this.upgraded = true;
@@ -372,9 +386,11 @@ describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_00
 
   it("verifies the certificate against the target IP (host passed to the upgrade)", async () => {
     // The fixture cert carries ONLY an IP:127.0.0.1 SAN (CN is unmatchable),
-    // and verification is ON: if the upgrade omitted host, identity would
-    // fall back to "localhost" and fail — so this exact success pins the
-    // IP-target verification path.
+    // and verification is ON: this success pins that identity is checked
+    // against the target IP (dropping the upgrade's `host` option falls back
+    // to "localhost" and fails). The pre-fix code (servername = the IP)
+    // also verified — its defects were IP-in-SNI + DEP0123, pinned by the
+    // ClientHello probe in the next test.
     const server = new FakeManageSieveServer("starttls");
     const port = await server.listen();
     let client: ManageSieveClient | null = null;
@@ -390,6 +406,21 @@ describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_00
       await client?.close().catch(() => client!.destroy());
       server.close();
     }
+  });
+
+  it("destroys the connection when STARTTLS is refused", async () => {
+    const server = new FakeManageSieveServer("starttls");
+    server.rejectStarttls = true;
+    const port = await server.listen();
+    await expect(
+      ManageSieveClient.connect({ host: "127.0.0.1", port, secure: "starttls" }, TEST_ACCOUNT),
+    ).rejects.toThrow(/TLS not available/);
+    // The refusal path must not leak the plaintext socket (same pattern as
+    // the auth test): it closes promptly instead of lingering until the
+    // inactivity timeout.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(server.socketClosed).toBe(true);
+    server.close();
   });
 
   it("sends STARTTLS first, consumes the re-issued greeting, then works", async () => {
@@ -416,6 +447,10 @@ describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_00
         { name: "active", active: true },
         { name: "vacation", active: false },
       ]);
+      // RFC 6066: the ClientHello for an IP target must NOT carry the IP
+      // in the ServerNameList (the pre-fix code sent it there and tripped
+      // DEP0123). This fails against servername = IP.
+      expect(server.helloProbe).not.toContain("127.0.0.1");
     } finally {
       // Teardown even on assertion failure — no lingering handles that
       // would bury the real failure.
