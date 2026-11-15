@@ -37,6 +37,39 @@ export type EmailAccount = {
   draftsFolder?: string;
 };
 
+export interface SieveConfig {
+  host: string;
+  port: number;
+  /** "starttls" (default — plain connect, upgrade before auth), "tls"
+   *  (implicit), "plain" (no TLS; servers with disable_plaintext_auth
+   *  reject auth). */
+  secure: "starttls" | "tls" | "plain";
+}
+
+export interface SieveScriptSummary {
+  name: string;
+  active: boolean;
+}
+
+export interface SieveCheckResult {
+  valid: boolean;
+  /** Raw NO message from the server (line/column errors etc.); set when invalid. */
+  errors?: string;
+}
+
+/** Runtime-agnostic ManageSieve operations (RFC 5804). Protocol I/O lives in
+ *  the runtimes (apps/node/src/managesieve-client.ts). Account credentials
+ *  come from the account's IMAP settings. */
+export interface SieveBackend {
+  capabilities(account: EmailAccount): Promise<string[]>;
+  listScripts(account: EmailAccount): Promise<SieveScriptSummary[]>;
+  getScript(account: EmailAccount, name: string): Promise<string>;
+  putScript(account: EmailAccount, name: string, content: string): Promise<void>;
+  checkScript(account: EmailAccount, content: string): Promise<SieveCheckResult>;
+  setActive(account: EmailAccount, name: string): Promise<void>;
+  deleteScript(account: EmailAccount, name: string): Promise<void>;
+}
+
 export type RuntimeConfig = {
   accounts: Record<string, EmailAccount>;
   defaultAccount: string;
@@ -51,6 +84,8 @@ export type RuntimeConfig = {
   maxBodyChars: number;
   /** Attachments larger than this are listed but their content is not returned. */
   attachmentMaxBytes: number;
+  /** ManageSieve endpoint; sieve_* tools register only when set. */
+  sieve?: SieveConfig;
 };
 
 export type FolderInfo = {

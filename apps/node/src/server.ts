@@ -13,7 +13,9 @@ import {
   type DispatchContext,
   type RuntimeConfig,
 } from "@mail-mcp/core";
+import type { EmailAccount } from "@mail-mcp/core";
 import { createNodeBackend } from "./backend.js";
+import { ManageSieveBackend } from "./managesieve-client.js";
 
 /** Max JSON-RPC request body (attachments arrive base64-encoded). */
 const MAX_REQUEST_BYTES = Number(process.env.MAX_REQUEST_BYTES ?? "") || 32 * 1024 * 1024;
@@ -50,6 +52,12 @@ export function createDispatchContext(config: RuntimeConfig): DispatchContext {
   return {
     config,
     backend: createNodeBackend(),
+    sieve: config.sieve
+      ? new ManageSieveBackend(config.sieve, (account: EmailAccount) => ({
+          user: account.imap.user,
+          password: account.imap.password,
+        }))
+      : undefined,
     cache: config.cacheTtlSeconds > 0 ? memoryCache() : undefined,
     cursors: memoryCursorStore(),
   };

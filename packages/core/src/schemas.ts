@@ -207,6 +207,55 @@ export const draftEmailSchema = z.object({
   attachments,
 });
 
+// ---------- sieve (ManageSieve RFC 5804) ----------
+
+const sieveAccount = z
+  .string()
+  .optional()
+  .describe("Account name from accounts_list. Omit for the default account.");
+const sieveScriptName = z
+  .string()
+  .min(1)
+  .describe('Sieve script name, e.g. "active".');
+const sieveContent = z
+  .string()
+  .min(1)
+  .describe("Full Sieve script source (RFC 5222).");
+
+export const sieveScriptsListSchema = z.object({ account_name: sieveAccount });
+
+export const sieveScriptGetSchema = z.object({
+  account_name: sieveAccount,
+  name: sieveScriptName,
+});
+
+export const sieveScriptPutSchema = z.object({
+  account_name: sieveAccount,
+  name: sieveScriptName,
+  content: sieveContent,
+  /** Validate server-side (CHECKSCRIPT) before saving. Default true — an
+   *  invalid script is reported and NOT saved. */
+  validate: z.boolean().optional(),
+});
+
+export const sieveScriptCheckSchema = z.object({
+  account_name: sieveAccount,
+  content: sieveContent,
+});
+
+export const sieveScriptActivateSchema = z.object({
+  account_name: sieveAccount,
+  name: sieveScriptName,
+});
+
+export const sieveScriptDeleteSchema = z.object({
+  account_name: sieveAccount,
+  name: sieveScriptName,
+  /** confirm: true required — deleting the active script is refused by
+   *  well-behaved servers (activate another script first). */
+  confirm: z.boolean(),
+});
+
 export const TOOL_NAMES = [
   "accounts_list",
   "folders_list",
@@ -220,6 +269,12 @@ export const TOOL_NAMES = [
   "email_draft",
   "email_send",
   "email_respond",
+  "sieve_scripts_list",
+  "sieve_script_get",
+  "sieve_script_put",
+  "sieve_script_check",
+  "sieve_script_activate",
+  "sieve_script_delete",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
