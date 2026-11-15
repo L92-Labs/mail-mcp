@@ -466,19 +466,34 @@ export class ManageSieveClient {
     this.socket.write(data);
   }
 
+  /** Absorb a response's capability lines. RFC 5804 §4 permits capability
+   *  NAMES as synchronised literals — readTagged keeps their exact bytes in
+   *  literalValues[i] (the remainder alone sits in untagged[i]), so the
+   *  name must be taken from there, with the remainder parsed as the value
+   *  tokens. */
+  private absorbCapabilities(res: SieveResult): void {
+    res.untagged.forEach((line, i) => {
+      if (res.fromLiteral[i]) this.capabilities.push(res.literalValues[i]);
+      this.capabilities.push(...parseCapabilityLine(line));
+    });
+  }
+
   /** Read the server greeting: capability lines + OK. RFC 5804 §2.2 — the
    *  greeting REPLACES cached capabilities (fresh list after STARTTLS). */
   private async readGreeting(): Promise<void> {
     const res = await this.readTagged();
-    this.capabilities = res.untagged.flatMap((line) => parseCapabilityLine(line));
+    const caps: string[] = [];
+    res.untagged.forEach((line, i) => {
+      if (res.fromLiteral[i]) caps.push(res.literalValues[i]);
+      caps.push(...parseCapabilityLine(line));
+    });
+    this.capabilities = caps;
   }
 
   /** CAPABILITY command; merges the advertised capabilities. */
   async capability(): Promise<string[]> {
     const res = await this.command("CAPABILITY");
-    for (const line of res.untagged) {
-      this.capabilities.push(...parseCapabilityLine(line));
-    }
+    this.absorbCapabilities(res);
     return this.capabilities;
   }
 }

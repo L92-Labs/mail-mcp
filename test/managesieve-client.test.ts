@@ -41,6 +41,8 @@ class FakeManageSieveServer {
   rejectAuth = false;
   /** STARTTLS is refused with NO (connection stays open server-side). */
   rejectStarttls = false;
+  /** The SIEVE capability NAME is delivered as a synchronised literal. */
+  literalCapName = false;
   /** True once the current connection's socket closed. */
   socketClosed = false;
   /** The raw ClientHello bytes seen on the STARTTLS upgrade (latin1). */
@@ -56,7 +58,11 @@ class FakeManageSieveServer {
     const lines = [
       '"IMPLEMENTATION" "Test Server"',
       ...(this.mode === "starttls" && !this.upgraded ? ['"STARTTLS"'] : []),
-      '"SIEVE" "FILEINTO"',
+      this.literalCapName
+        ? // RFC 5804 §4: capability names may arrive as synchronised
+          // literals — {5} announces the 5 bytes "SIEVE", then the value.
+          '{5}\r\nSIEVE "FILEINTO"'
+        : '"SIEVE" "FILEINTO"',
       '"VERSION" "1.0"',
     ];
     return lines.join("\r\n") + '\r\nOK "ready"\r\n';
@@ -365,6 +371,26 @@ describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
   it("LOGOUT closes the connection", async () => {
     await client.close();
   });
+  it("decodes capability names delivered as literals (RFC 5804 §4)", async () => {
+    const server = new FakeManageSieveServer("plain");
+    server.literalCapName = true;
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      // With the name kept only in the remainder, connect() would reject a
+      // compliant server claiming it does not advertise SIEVE support.
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "plain" },
+        TEST_ACCOUNT,
+      );
+      expect(client.capabilities).toContain("SIEVE");
+      expect(client.capabilities).toContain("FILEINTO");
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+
   it("destroys the connection when AUTHENTICATE is refused", async () => {
     const server = new FakeManageSieveServer("plain");
     server.rejectAuth = true;
