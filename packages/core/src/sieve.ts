@@ -2,7 +2,16 @@ import type { SieveScriptSummary } from "./types.js";
 
 
 /** Escape a string for a ManageSieve quoted string. */
+/** Render a ManageSieve quoted string. The caller must pre-screen: CR, LF
+ *  and other control characters are illegal inside a quoted string (they
+ *  would split the command stream) and must travel as a {N+} literal — so
+ *  this throws rather than emitting them raw. */
 export function quoteSieveString(value: string): string {
+  if (/[\r\n\x00-\x1f\x7f]/.test(value)) {
+    throw new Error(
+      "quoted Sieve string would contain a control character; use the literal form instead",
+    );
+  }
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 

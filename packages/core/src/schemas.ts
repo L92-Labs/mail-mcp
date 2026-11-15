@@ -216,6 +216,10 @@ const sieveAccount = z
 const sieveScriptName = z
   .string()
   .min(1)
+  // CR/LF/control characters in a name would be an injection attempt; the
+  // client's literal-form path exists for protocol completeness, but the
+  // tool boundary rejects them outright.
+  .refine((v) => !/[\r\n\x00-\x1f\x7f]/.test(v), "must not contain control characters")
   .describe('Sieve script name, e.g. "active".');
 const sieveContent = z
   .string()

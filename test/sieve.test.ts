@@ -65,6 +65,11 @@ describe("sieve wire helpers", () => {
     expect(quoteSieveString('He said "hi"')).toBe('"He said \\"hi\\""');
     expect(quoteSieveString("back\\slash")).toBe('"back\\\\slash"');
   });
+
+  it("quoteSieveString refuses control characters instead of emitting them raw", () => {
+    expect(() => quoteSieveString("evil\r\nDELETESCRIPT \"x\"")).toThrow(/control character/);
+    expect(() => quoteSieveString("line\nbreak")).toThrow(/control character/);
+  });
 });
 
 // ---------- dispatch with a fake SieveBackend ----------
