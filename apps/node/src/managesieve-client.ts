@@ -149,9 +149,13 @@ export class ManageSieveClient {
       Buffer.from(content, "utf8"),
     );
     if (isSieveNo(res.tagged)) throw new Error(`PUTSCRIPT refused: ${res.message}`);
-    // RFC 5804 §2.6: OK may carry a WARNINGS response code — surface it.
-    const warnings = /\(WARNINGS\s+"((?:[^"\\]|\\.)*)"\)/i.exec(res.tagged);
-    return warnings ? unescapeSieveString(warnings[1]) : undefined;
+    // RFC 5804 §2.6 + §4 ABNF: WARNINGS carries no argument — the warning
+    // text is the tagged OK message itself. Tolerate a quoted-argument
+    // form too (some servers include it).
+    const code = /\(WARNINGS\b[^)]*\)/i.exec(res.tagged);
+    if (!code) return undefined;
+    const quoted = /"((?:[^"\\]|\\.)*)"/.exec(code[0]);
+    return quoted ? unescapeSieveString(quoted[1]) : res.message;
   }
 
   async checkScript(content: string): Promise<SieveCheckResult> {
@@ -289,12 +293,21 @@ export class ManageSieveClient {
   private async readTagged(): Promise<SieveResult> {
     const untagged: string[] = [];
     for (;;) {
-      const line = await this.readLine();
+      let line = await this.readLine();
       const literal = /^\{(\d+)\}$/.exec(line);
       if (literal) {
         const bytes = await this.readLiteralBytes(Number(literal[1]));
         untagged.push(bytes + (await this.readLine()));
         continue;
+      }
+      // Trailing literal: a tagged line whose human-readable message travels
+      // as a synchronised literal (RFC 5804 §2.8 `No (NONEXISTENT) {31}`,
+      // §2.12 multiline compile errors — quoted strings cannot hold raw
+      // CRLFs). Resolve the bytes into the line before classifying it, or
+      // they would linger in the buffer and corrupt the next exchange.
+      for (let t = /\{(\d+)\}$/.exec(line); t; t = /\{(\d+)\}$/.exec(line)) {
+        const bytes = await this.readLiteralBytes(Number(t[1]));
+        line = line.slice(0, t.index) + bytes + (await this.readLine());
       }
       if (isSieveBye(line)) {
         this.destroy();

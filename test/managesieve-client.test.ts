@@ -28,6 +28,10 @@ class FakeManageSieveServer {
   literalListName = false;
   /** PUTSCRIPT replies with a WARNINGS response code. */
   warningsOnPut = false;
+  /** DELETESCRIPT replies NO with a trailing-literal message (§2.8). */
+  nonexistentDelete = false;
+  /** CHECKSCRIPT replies NO with a multiline literal error (§2.12). */
+  multilineCheckError = false;
 
   constructor(private readonly mode: "plain" | "implicit-tls" | "starttls" = "plain") {}
 
@@ -114,13 +118,23 @@ class FakeManageSieveServer {
     }
     if (line.startsWith("PUTSCRIPT") || line.startsWith("CHECKSCRIPT")) {
       const last = this.received[this.received.length - 1] ?? "";
+      if (this.multilineCheckError) {
+        // RFC 5804 §2.12: multi-error reports travel as a multiline literal.
+        const errText = "line 1: syntax error\nline 2: unknown command";
+        socket.write(`NO {${Buffer.byteLength(errText)}}\r\n${errText}\r\n`);
+        return;
+      }
       if (this.invalidMarker !== "" && last.includes(this.invalidMarker)) {
         socket.write('NO (line: 1:1) "unknown command BOGUS"\r\n');
         return;
       }
-      socket.write(
-        this.warningsOnPut ? 'OK (WARNINGS "tag kept") "stored"\r\n' : 'OK "stored"\r\n',
-      );
+      if (this.warningsOnPut) {
+        // RFC 5804 §2.6/§4: the ABNF form carries NO argument; the text is
+        // the tagged message itself.
+        socket.write('OK (WARNINGS) "line 8: server redirect action limit is 2"\r\n');
+        return;
+      }
+      socket.write('OK "stored"\r\n');
       return;
     }
     if (line.startsWith("SETACTIVE")) {
@@ -128,6 +142,12 @@ class FakeManageSieveServer {
       return;
     }
     if (line.startsWith("DELETESCRIPT")) {
+      if (this.nonexistentDelete) {
+        // RFC 5804 §2.8 example: message travels as a trailing literal.
+        const msg = "There is no script by that name";
+        socket.write(`NO (NONEXISTENT) {${Buffer.byteLength(msg)}}\r\n${msg}\r\n`);
+        return;
+      }
       socket.write('OK "deleted"\r\n');
       return;
     }
@@ -232,11 +252,29 @@ describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
     ]);
   });
 
-  it("PUTSCRIPT surfaces the server's WARNINGS response code", async () => {
+  it("PUTSCRIPT surfaces the bare (WARNINGS) form per RFC 5804 §2.6", async () => {
     server.warningsOnPut = true;
     const warnings = await client.putScript("active", "keep;");
     server.warningsOnPut = false;
-    expect(warnings).toBe("tag kept");
+    expect(warnings).toBe("line 8: server redirect action limit is 2");
+  });
+
+  it("DELETESCRIPT error with trailing-literal message surfaces the text (RFC 5804 §2.8)", async () => {
+    server.nonexistentDelete = true;
+    await expect(client.deleteScript("baz")).rejects.toThrow(/There is no script by that name/);
+    server.nonexistentDelete = false;
+    // The literal bytes did not linger in the buffer: the dialogue is intact.
+    await client.deleteScript("vacation");
+    expect(server.received[server.received.length - 1]).toBe('DELETESCRIPT "vacation"');
+  });
+
+  it("CHECKSCRIPT multiline literal errors are surfaced (RFC 5804 §2.12)", async () => {
+    server.multilineCheckError = true;
+    const r = await client.checkScript("bad;");
+    server.multilineCheckError = false;
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain("line 1: syntax error");
+    expect(r.errors).toContain("line 2: unknown command");
   });
 
   it("SETACTIVE and DELETESCRIPT send quoted names", async () => {

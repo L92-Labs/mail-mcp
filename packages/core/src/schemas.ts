@@ -224,7 +224,7 @@ const sieveScriptName = z
 const sieveContent = z
   .string()
   .min(1)
-  .describe("Full Sieve script source (RFC 5222).");
+  .describe("Full Sieve script source (RFC 5228).");
 
 export const sieveScriptsListSchema = z.object({ account_name: sieveAccount });
 
