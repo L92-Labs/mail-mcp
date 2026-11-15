@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-15
+
+- Sieve filter script management (RFC 5804 ManageSieve): six `sieve_*` tools —
+  `sieve_scripts_list`, `sieve_script_get`, `sieve_script_put`,
+  `sieve_script_check`, `sieve_script_activate`, `sieve_script_delete` — gated
+  on `SIEVE_HOST` (with `SIEVE_PORT` / `SIEVE_SECURE`). Auth reuses each
+  account's IMAP credentials over STARTTLS (or implicit TLS / plaintext via
+  `SIEVE_SECURE`). Server-side validation (CHECKSCRIPT) runs before saving;
+  the server's WARNINGS response code is surfaced; deleting the active script
+  is refused. Node/Docker runtime only — the tools never register on Workers.
+- Wire-protocol correctness, verified against RFC 5804 and a live Dovecot
+  Pigeonhole server and pinned by an in-process fake ManageSieve server:
+  greeting capability parsing without the CAPABILITY token (§1.7), STARTTLS
+  command ordering with post-handshake capability-greeting replacement (§2.2),
+  non-synchronised `{N+}` literal arguments for PUTSCRIPT/CHECKSCRIPT (§2.6),
+  synchronised `{N}` literal decoding for GETSCRIPT content and LISTSCRIPTS
+  names — including names that themselves start with OK/NO/BYE or contain the
+  ACTIVE marker (§2.7/§2.9), tagged messages delivered as trailing literals
+  (§2.8/§2.12), quoted-string forms, NO/BYE detection with response codes,
+  SNI for DNS hosts (omitted for IP literals per RFC 6066), control-character
+  rejection at the tool boundary, and socket hygiene (destroy on refused
+  STARTTLS/AUTHENTICATE, 20s inactivity timeout, bounded handshake).
+
+## 0.3.1 — 2026-11-15
 
 - Fixed phantom moves: `emails_modify` now validates move targets against
   the server and refuses non-existent folders before any backend call.
@@ -13,6 +36,7 @@
 - Move targets: exact listed paths win verbatim (whitespace names
   preserved); INBOX destinations always exist regardless of the listing's
   INBOX spelling.
+
 ## 0.3.0 — 2026-11-14
 
 - Full folder management: `folder_create`, `folder_rename` and `folder_delete`

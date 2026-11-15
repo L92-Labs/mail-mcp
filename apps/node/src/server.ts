@@ -21,7 +21,7 @@ import { ManageSieveBackend } from "./managesieve-client.js";
 const MAX_REQUEST_BYTES = Number(process.env.MAX_REQUEST_BYTES ?? "") || 32 * 1024 * 1024;
 
 export function buildMcpServer(ctx: DispatchContext): McpServer {
-  const server = new McpServer({ name: "mail-mcp", version: "0.3.1" });
+  const server = new McpServer({ name: "mail-mcp", version: "0.4.0" });
   for (const tool of enabledToolMeta(ctx.config)) {
     server.registerTool(
       tool.name,
