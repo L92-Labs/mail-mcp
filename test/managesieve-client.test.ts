@@ -27,8 +27,6 @@ class FakeManageSieveServer {
   invalidMarker = "";
   /** LISTSCRIPTS replies with a synchronised-literal script name. */
   literalListName = false;
-  /** Override for the raw LISTSCRIPTS wire response. */
-  listScriptsResponse: string | null = null;
   /** Override for the raw GETSCRIPT wire response. */
   getScriptResponse: string | null = null;
   /** PUTSCRIPT replies with a WARNINGS response code. */
@@ -45,8 +43,11 @@ class FakeManageSieveServer {
   literalCapName = false;
   /** True once the current connection's socket closed. */
   socketClosed = false;
-  /** The raw ClientHello bytes seen on the STARTTLS upgrade (latin1). */
-  helloProbe = "";
+  /** SNI servername captured from the STARTTLS ClientHello (null = none
+   *  sent). Filled via SNICallback on the wrapped TLSSocket — the capture
+   *  mechanism GLM validated as live on Node v24 (a plain 'data' spy sees
+   *  nothing after the TLSSocket takeover). */
+  helloSni: string | null = null;
   /** CHECKSCRIPT replies NO whose literal message ends in "{N}". */
   messageEndsWithBrace = false;
 
@@ -103,17 +104,21 @@ class FakeManageSieveServer {
           return;
         }
         // RFC 5804 §2.2: OK, then the handshake begins; afterwards the
-        // server re-issues its capability greeting.
+        // server re-issues its capability greeting. SNICallback on the
+        // wrapped TLSSocket is honored on Node v24 (unlike tls.createServer
+        // with a default key/cert context) and captures the ClientHello's
+        // SNI — a plain 'data' spy sees nothing after the takeover.
         socket.write('OK "Begin TLS negotiation now."\r\n');
         socket.removeAllListeners("data");
-        // Spy on the ClientHello (SNI inspection) without consuming it —
-        // 'data' listeners broadcast, so the TLSSocket still reads its bytes.
-        this.helloProbe = "";
-        socket.on("data", (chunk: Buffer) => {
-          this.helloProbe += chunk.toString("latin1");
-        });
         this.buffer = "";
-        const secure = new tls.TLSSocket(socket, { isServer: true, secureContext: SECURE_CONTEXT });
+        const secure = new tls.TLSSocket(socket, {
+          isServer: true,
+          secureContext: SECURE_CONTEXT,
+          SNICallback: (servername, cb) => {
+            this.helloSni = servername ?? null;
+            cb(null, SECURE_CONTEXT);
+          },
+        });
         this.upgraded = true;
         this.attach(secure);
         return;
@@ -449,6 +454,27 @@ describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_00
     server.close();
   });
 
+  it("sends the configured hostname as SNI (liveness canary for the capture)", async () => {
+    // Proves the SNICallback capture is LIVE: a DNS-name host legitimately
+    // sends SNI, and the callback must observe it. Without this arm a dead
+    // capture mechanism (like the earlier 'data' spy) would let the IP pin
+    // above pass vacuously.
+    const server = new FakeManageSieveServer("starttls");
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "localhost", port, secure: "starttls" },
+        TEST_ACCOUNT,
+        false, // self-signed test fixture
+      );
+      expect(server.helloSni).toBe("localhost");
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+
   it("sends STARTTLS first, consumes the re-issued greeting, then works", async () => {
     const port = await server.listen();
     let client: ManageSieveClient | null = null;
@@ -475,8 +501,9 @@ describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_00
       ]);
       // RFC 6066: the ClientHello for an IP target must NOT carry the IP
       // in the ServerNameList (the pre-fix code sent it there and tripped
-      // DEP0123). This fails against servername = IP.
-      expect(server.helloProbe).not.toContain("127.0.0.1");
+      // DEP0123). Fails against servername = IP; with no SNI sent the
+      // callback never fires and helloSni stays null.
+      expect(server.helloSni).not.toBe("127.0.0.1");
     } finally {
       // Teardown even on assertion failure — no lingering handles that
       // would bury the real failure.
@@ -517,8 +544,10 @@ describe("ManageSieveClient SNI (implicit TLS)", { timeout: 15_000 }, () => {
   it("sends the configured hostname in the ClientHello SNI extension", async () => {
     // RFC 6066: SNI carries DNS hostnames only (never IP literals), so a
     // hostname host is required to exercise the extension. A raw TCP probe
-    // inspects the plaintext ClientHello — Node v24 ignores server-side
-    // sniCallback when a default key/cert context exists.
+    // inspects the plaintext ClientHello — server-side sniCallback via
+    // tls.createServer proved unreliable on Node v24 (the STARTTLS suite
+    // instead captures SNI through SNICallback on a directly-constructed
+    // TLSSocket, which IS honored).
     let hello = "";
     const srv = net.createServer((s) => {
       s.once("data", (chunk: Buffer) => {
