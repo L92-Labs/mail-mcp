@@ -4,6 +4,7 @@ import type {
   MailMode,
   RuntimeConfig,
   SaveSentPolicy,
+  SieveConfig,
   SmtpConfig,
 } from "./types.js";
 
@@ -43,6 +44,20 @@ function parseNonNegative(value: string | undefined, fallback: number): number {
   if (value === undefined || value.trim() === "") return fallback;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+export function parseSieve(env: EnvMap): SieveConfig | undefined {
+  const host = env.SIEVE_HOST?.trim();
+  if (!host) return undefined;
+  const secureRaw = (env.SIEVE_SECURE ?? "starttls").trim().toLowerCase();
+  if (!["starttls", "tls", "plain"].includes(secureRaw)) {
+    throw new Error(`SIEVE_SECURE must be starttls, tls or plain, got: ${secureRaw}`);
+  }
+  return {
+    host,
+    port: parsePort(env.SIEVE_PORT, 4190),
+    secure: secureRaw as SieveConfig["secure"],
+  };
 }
 
 export function parseAllowlist(value: string | undefined): string[] {
@@ -221,6 +236,7 @@ export function loadRuntimeConfig(
     accounts,
     defaultAccount,
     mode,
+    sieve: parseSieve(env),
     cacheTtlSeconds: parseNonNegative(env.CACHE_TTL_SECONDS, 0),
     eventsPollSeconds: parseNonNegative(env.EVENTS_POLL_SECONDS, 0),
     mcpBearerToken: env.MCP_BEARER_TOKEN?.trim() || undefined,

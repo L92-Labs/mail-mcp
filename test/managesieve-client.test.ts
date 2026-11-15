@@ -1,0 +1,660 @@
+import fs from "node:fs";
+import net from "node:net";
+import tls from "node:tls";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ManageSieveClient } from "../apps/node/src/managesieve-client.js";
+
+const TLS_KEY = fs.readFileSync(new URL("./fixtures/managesieve-tls.key", import.meta.url), "utf8");
+const TLS_CERT = fs.readFileSync(new URL("./fixtures/managesieve-tls.crt", import.meta.url), "utf8");
+const TLS_CA = fs.readFileSync(new URL("./fixtures/managesieve-test-ca.crt", import.meta.url), "utf8");
+const SECURE_CONTEXT = tls.createSecureContext({ key: TLS_KEY, cert: TLS_CERT });
+const TEST_ACCOUNT = { imap: { user: "me@loiu92.com", password: "pw" } } as never;
+
+/** Minimal in-process ManageSieve server (RFC 5804 subset) for protocol
+ *  tests. Modes: plain, implicit-tls, starttls. Handles commands with
+ *  non-synchronised literal bodies ({N+} → N raw bytes follow the command
+ *  line). Records every exchange. */
+class FakeManageSieveServer {
+  private server?: net.Server | tls.Server;
+  private buffer = "";
+  readonly received: string[] = [];
+  /** True once a STARTTLS upgrade completed on the current connection. */
+  upgraded = false;
+  /** Override for the LISTSCRIPTS response (raw wire text). */
+  listScriptsResponse: string | null = null;
+  /** Fail the current PUTSCRIPT/CHECKSCRIPT when the literal body contains
+   *  this marker (simulates a server-side compile error for CHECKSCRIPT). */
+  invalidMarker = "";
+  /** LISTSCRIPTS replies with a synchronised-literal script name. */
+  literalListName = false;
+  /** Override for the raw GETSCRIPT wire response. */
+  getScriptResponse: string | null = null;
+  /** PUTSCRIPT replies with a WARNINGS response code. */
+  warningsOnPut = false;
+  /** DELETESCRIPT replies NO with a trailing-literal message (§2.8). */
+  nonexistentDelete = false;
+  /** CHECKSCRIPT replies NO with a multiline literal error (§2.12). */
+  multilineCheckError = false;
+  /** AUTHENTICATE is refused with NO (connection stays open server-side). */
+  rejectAuth = false;
+  /** STARTTLS is refused with NO (connection stays open server-side). */
+  rejectStarttls = false;
+  /** The SIEVE capability NAME is delivered as a synchronised literal. */
+  literalCapName = false;
+  /** True once the current connection's socket closed. */
+  socketClosed = false;
+  /** SNI servername captured from the STARTTLS ClientHello (null = none
+   *  sent). Filled via SNICallback on the wrapped TLSSocket — the capture
+   *  mechanism GLM validated as live on Node v24 (a plain 'data' spy sees
+   *  nothing after the TLSSocket takeover). */
+  helloSni: string | null = null;
+  /** CHECKSCRIPT replies NO whose literal message ends in "{N}". */
+  messageEndsWithBrace = false;
+
+  constructor(private readonly mode: "plain" | "implicit-tls" | "starttls" = "plain") {}
+
+  /** RFC 5804 §1.7 greeting; after a STARTTLS upgrade the fresh list drops
+   *  STARTTLS (§2.2) — mirrored from real Dovecot behaviour. */
+  private greeting(): string {
+    const lines = [
+      '"IMPLEMENTATION" "Test Server"',
+      ...(this.mode === "starttls" && !this.upgraded ? ['"STARTTLS"'] : []),
+      this.literalCapName
+        ? // RFC 5804 §4: capability names may arrive as synchronised
+          // literals — and the VALUE may follow as one too: {5} announces
+          // "SIEVE", {8} announces "fileinto".
+          '{5}\r\nSIEVE {8}\r\nfileinto'
+        : '"SIEVE" "FILEINTO"',
+      '"VERSION" "1.0"',
+    ];
+    return lines.join("\r\n") + '\r\nOK "ready"\r\n';
+  }
+
+  private attach(socket: net.Socket): void {
+    socket.write(this.greeting());
+    socket.on("close", () => {
+      this.socketClosed = true;
+    });
+    socket.on("data", (chunk: Buffer) => {
+      this.buffer += chunk.toString("utf8");
+      this.processBuffer(socket);
+    });
+  }
+
+  private processBuffer(socket: net.Socket): void {
+    for (;;) {
+      const lineEnd = this.buffer.indexOf("\r\n");
+      if (lineEnd < 0) break;
+      const line = this.buffer.slice(0, lineEnd).toString("utf8");
+      const literalMatch = /\{(\d+)\+\}$/.exec(line.trimEnd());
+      if (literalMatch) {
+        const size = Number(literalMatch[1]);
+        const bodyStart = lineEnd + 2;
+        if (this.buffer.length < bodyStart + size) return; // wait for body
+        const body = this.buffer.slice(bodyStart, bodyStart + size).toString("utf8");
+        this.buffer = this.buffer.slice(bodyStart + size);
+        this.received.push(`${line.trimEnd()}\r\n${body}`);
+        this.respond(socket, line.trimEnd());
+        continue;
+      }
+      this.buffer = this.buffer.slice(lineEnd + 2);
+      this.received.push(line);
+      if (line === "STARTTLS" && this.mode === "starttls" && !this.upgraded) {
+        if (this.rejectStarttls) {
+          socket.write('NO "TLS not available"\r\n');
+          return;
+        }
+        // RFC 5804 §2.2: OK, then the handshake begins; afterwards the
+        // server re-issues its capability greeting. SNICallback on the
+        // wrapped TLSSocket is honored on Node v24 (unlike tls.createServer
+        // with a default key/cert context) and captures the ClientHello's
+        // SNI — a plain 'data' spy sees nothing after the takeover.
+        socket.write('OK "Begin TLS negotiation now."\r\n');
+        socket.removeAllListeners("data");
+        this.buffer = "";
+        const secure = new tls.TLSSocket(socket, {
+          isServer: true,
+          secureContext: SECURE_CONTEXT,
+          SNICallback: (servername, cb) => {
+            this.helloSni = servername ?? null;
+            cb(null, SECURE_CONTEXT);
+          },
+        });
+        this.upgraded = true;
+        this.attach(secure);
+        return;
+      }
+      this.respond(socket, line);
+    }
+  }
+
+  private respond(socket: net.Socket, line: string): void {
+    if (line.startsWith("CAPABILITY")) {
+      socket.write(this.greeting());
+      return;
+    }
+    if (line.startsWith("AUTHENTICATE")) {
+      if (this.rejectAuth) {
+        socket.write('NO (AUTHFAILED) "bad credentials"\r\n');
+        return;
+      }
+      socket.write('OK "authenticated"\r\n');
+      return;
+    }
+    if (line.startsWith("LISTSCRIPTS")) {
+      if (this.listScriptsResponse !== null) {
+        socket.write(this.listScriptsResponse);
+      } else if (this.literalListName) {
+        // RFC 5804 §2.7: names with special chars arrive as synchronised
+        // literals — {N} CRLF name-bytes continue the same line.
+        const name = 'cle"ver';
+        socket.write(`{${Buffer.byteLength(name)}}\r\n${name} ACTIVE\r\n"vacation"\r\nOK\r\n`);
+      } else {
+        socket.write('"active" ACTIVE\r\n"vacation"\r\nOK\r\n');
+      }
+      return;
+    }
+    if (line.startsWith("GETSCRIPT")) {
+      if (this.getScriptResponse !== null) {
+        socket.write(this.getScriptResponse);
+        return;
+      }
+      // Server→client literals are synchronised: {N} CRLF content CRLF.
+      const content = 'require ["fileinto"]; keep;\n# demo';
+      socket.write(`{${Buffer.byteLength(content)}}\r\n${content}\r\nOK\r\n`);
+      return;
+    }
+    if (line.startsWith("PUTSCRIPT") || line.startsWith("CHECKSCRIPT")) {
+      const last = this.received[this.received.length - 1] ?? "";
+      if (this.messageEndsWithBrace) {
+        // The decoded message itself ends in "{1}" — data, not framing.
+        const msg = "syntax error {1}";
+        socket.write(`NO {${Buffer.byteLength(msg)}}\r\n${msg}\r\n`);
+        return;
+      }
+      if (this.multilineCheckError) {
+        // RFC 5804 §2.12: multi-error reports travel as a multiline literal.
+        const errText = "line 1: syntax error\nline 2: unknown command";
+        socket.write(`NO {${Buffer.byteLength(errText)}}\r\n${errText}\r\n`);
+        return;
+      }
+      if (this.invalidMarker !== "" && last.includes(this.invalidMarker)) {
+        socket.write('NO (line: 1:1) "unknown command BOGUS"\r\n');
+        return;
+      }
+      if (this.warningsOnPut) {
+        // RFC 5804 §2.6/§4: the ABNF form carries NO argument; the text is
+        // the tagged message itself.
+        socket.write('OK (WARNINGS) "line 8: server redirect action limit is 2"\r\n');
+        return;
+      }
+      socket.write('OK "stored"\r\n');
+      return;
+    }
+    if (line.startsWith("SETACTIVE")) {
+      socket.write('OK "activated"\r\n');
+      return;
+    }
+    if (line.startsWith("DELETESCRIPT")) {
+      if (this.nonexistentDelete) {
+        // RFC 5804 §2.8 example: message travels as a trailing literal.
+        const msg = "There is no script by that name";
+        socket.write(`NO (NONEXISTENT) {${Buffer.byteLength(msg)}}\r\n${msg}\r\n`);
+        return;
+      }
+      socket.write('OK "deleted"\r\n');
+      return;
+    }
+    if (line.startsWith("LOGOUT")) {
+      socket.write('OK "bye"\r\n');
+      return;
+    }
+    socket.write('NO "unknown command"\r\n');
+  }
+
+  private get lastRaw(): string {
+    return this.received.join("\r\n");
+  }
+
+  listen(): Promise<number> {
+    if (this.mode === "implicit-tls") {
+      this.server = tls.createServer({ key: TLS_KEY, cert: TLS_CERT }, (s) => this.attach(s));
+    } else {
+      this.server = net.createServer((s) => this.attach(s));
+    }
+    return new Promise((resolve) => {
+      this.server!.listen(0, "127.0.0.1", () => {
+        resolve((this.server!.address() as net.AddressInfo).port);
+      });
+    });
+  }
+
+  close(): void {
+    this.server?.close();
+  }
+}
+
+describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
+  const server = new FakeManageSieveServer("plain");
+  let port = 0;
+  let client: ManageSieveClient;
+
+  beforeAll(async () => {
+    port = await server.listen();
+    expect(port).toBeGreaterThan(0);
+    client = await ManageSieveClient.connect(
+      { host: "127.0.0.1", port, secure: "plain" },
+      TEST_ACCOUNT,
+    );
+    // RFC 5804 §1.7: greeting/capability lines are bare quoted-token lists
+    // with NO "CAPABILITY" substring — a substring-gated parser would see
+    // nothing at all (real Dovecot behaves exactly like this).
+    expect(client.capabilities).toEqual(
+      expect.arrayContaining(["IMPLEMENTATION", "Test Server", "SIEVE", "FILEINTO", "VERSION", "1.0"]),
+    );
+  });
+
+  afterAll(async () => {
+    await client.close().catch(() => client.destroy());
+    server.close();
+  });
+
+  it("AUTHENTICATE PLAIN is sent after connect", () => {
+    expect(server.received.some((l) => l.startsWith("AUTHENTICATE"))).toBe(true);
+  });
+
+  it("LISTSCRIPTS parses quoted names + ACTIVE flag", async () => {
+    const scripts = await client.listScripts();
+    expect(scripts).toEqual([
+      { name: "active", active: true },
+      { name: "vacation", active: false },
+    ]);
+  });
+
+  it("GETSCRIPT returns the literal-decoded script content", async () => {
+    const script = await client.getScript("active");
+    expect(script).toBe('require ["fileinto"]; keep;\n# demo');
+  });
+
+  it("PUTSCRIPT sends the content as a non-synchronised literal", async () => {
+    const content = 'require ["vacation"]; keep;\nfileinto :create "INBOX/test";';
+    await client.putScript("active", content);
+    const size = Buffer.byteLength(content);
+    expect(server.received).toContain(`PUTSCRIPT "active" {${size}+}\r\n${content}`);
+  });
+
+  it("CHECKSCRIPT invalid content returns valid: false with the server error", async () => {
+    server.invalidMarker = "BOGUS";
+    const r = await client.checkScript("BOGUS script");
+    server.invalidMarker = "";
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain("unknown command BOGUS");
+  });
+
+  it("CHECKSCRIPT valid content returns valid: true", async () => {
+    const r = await client.checkScript("keep;");
+    expect(r.valid).toBe(true);
+  });
+
+  it("LISTSCRIPTS decodes synchronised-literal names (RFC 5804 §2.7)", async () => {
+    server.literalListName = true;
+    const scripts = await client.listScripts();
+    server.literalListName = false;
+    expect(scripts).toEqual([
+      { name: 'cle"ver', active: true },
+      { name: "vacation", active: false },
+    ]);
+  });
+
+  it("literal-name bytes are never confused with the ACTIVE marker", async () => {
+    // {10} announces 10 bytes: the NAME is "foo ACTIVE" — the marker is
+    // absent, so the script is inactive and the name keeps its spaces.
+    server.listScriptsResponse = '{10}\r\nfoo ACTIVE\r\nOK\r\n';
+    const scripts = await client.listScripts();
+    server.listScriptsResponse = null;
+    expect(scripts).toEqual([{ name: "foo ACTIVE", active: false }]);
+  });
+
+  it("GETSCRIPT decodes a quoted-script response (RFC 5804 §4 string form)", async () => {
+    server.getScriptResponse = '"keep;"\r\nOK\r\n';
+    const script = await client.getScript("active");
+    server.getScriptResponse = null;
+    expect(script).toBe("keep;");
+  });
+
+  it("PUTSCRIPT surfaces the bare (WARNINGS) form per RFC 5804 §2.6", async () => {
+    server.warningsOnPut = true;
+    const warnings = await client.putScript("active", "keep;");
+    server.warningsOnPut = false;
+    expect(warnings).toBe("line 8: server redirect action limit is 2");
+  });
+
+  it("DELETESCRIPT error with trailing-literal message surfaces the text (RFC 5804 §2.8)", async () => {
+    server.nonexistentDelete = true;
+    await expect(client.deleteScript("baz")).rejects.toThrow(/There is no script by that name/);
+    server.nonexistentDelete = false;
+    // The literal bytes did not linger in the buffer: the dialogue is intact.
+    await client.deleteScript("vacation");
+    expect(server.received[server.received.length - 1]).toBe('DELETESCRIPT "vacation"');
+  });
+
+  it("CHECKSCRIPT multiline literal errors are surfaced (RFC 5804 §2.12)", async () => {
+    server.multilineCheckError = true;
+    const r = await client.checkScript("bad;");
+    server.multilineCheckError = false;
+    expect(r.valid).toBe(false);
+    expect(r.errors).toContain("line 1: syntax error");
+    expect(r.errors).toContain("line 2: unknown command");
+  });
+
+  it("decoded literal messages ending in {N} are data, not framing", async () => {
+    server.messageEndsWithBrace = true;
+    const r = await client.checkScript("bad;");
+    server.messageEndsWithBrace = false;
+    // The decoded "{1}" did not hijack framing detection: the error came
+    // back promptly instead of hanging on a phantom 1-byte literal.
+    expect(r.valid).toBe(false);
+    expect(r.errors).toBe("syntax error {1}");
+  });
+
+  it("SETACTIVE and DELETESCRIPT send quoted names", async () => {
+    await client.setActive("vacation");
+    expect(server.received).toContain('SETACTIVE "vacation"');
+    await client.deleteScript("vacation");
+    expect(server.received).toContain('DELETESCRIPT "vacation"');
+  });
+
+  it("names with CRLF are sent as literals (injection-safe)", async () => {
+    const evil = 'evil\r\nDELETESCRIPT "everything"';
+    await client.setActive(evil);
+    const last = server.received[server.received.length - 1];
+    // The name went out as ONE non-synchronised literal datum: the CRLF
+    // inside it did NOT split the dialogue into a second command line.
+    expect(last).toBe(`SETACTIVE {${Buffer.byteLength(evil)}+}\r\n${evil}`);
+    await client.deleteScript(evil);
+  });
+
+  it("LOGOUT closes the connection", async () => {
+    await client.close();
+  });
+  it("decodes capability names + values delivered as literals (RFC 5804 §4)", async () => {
+    const server = new FakeManageSieveServer("plain");
+    server.literalCapName = true;
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      // With the name kept only in the remainder, connect() would reject a
+      // compliant server claiming it does not advertise SIEVE support; with
+      // the value's own literal left unresolved, "{8}" would leak in as a
+      // capability token.
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "plain" },
+        TEST_ACCOUNT,
+      );
+      expect(client.capabilities).toContain("SIEVE");
+      expect(client.capabilities).toContain("fileinto");
+      expect(client.capabilities).not.toContain("{8}");
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+
+  it("destroys the connection when AUTHENTICATE is refused", async () => {
+    const server = new FakeManageSieveServer("plain");
+    server.rejectAuth = true;
+    const port = await server.listen();
+    await expect(
+      ManageSieveClient.connect({ host: "127.0.0.1", port, secure: "plain" }, TEST_ACCOUNT),
+    ).rejects.toThrow(/bad credentials/);
+    // The client destroyed the socket instead of letting it linger until
+    // the inactivity timeout — repeated bad-credential calls cannot
+    // accumulate connections.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(server.socketClosed).toBe(true);
+    server.close();
+  });
+});
+
+describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_000 }, () => {
+  const server = new FakeManageSieveServer("starttls");
+
+  it("verifies the certificate against the target IP (host passed to the upgrade)", async () => {
+    // The fixture cert carries ONLY an IP:127.0.0.1 SAN (CN is unmatchable),
+    // and verification is ON: this success pins that identity is checked
+    // against the target IP (dropping the upgrade's `host` option falls back
+    // to "localhost" and fails). The pre-fix code (servername = the IP)
+    // also verified — its defects were IP-in-SNI + DEP0123, pinned by the
+    // ClientHello probe in the next test.
+    const server = new FakeManageSieveServer("starttls");
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "starttls" },
+        TEST_ACCOUNT,
+        true,
+        TLS_CA,
+      );
+      expect(server.upgraded).toBe(true);
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+
+  it("destroys the connection when STARTTLS is refused", async () => {
+    const server = new FakeManageSieveServer("starttls");
+    server.rejectStarttls = true;
+    const port = await server.listen();
+    await expect(
+      ManageSieveClient.connect({ host: "127.0.0.1", port, secure: "starttls" }, TEST_ACCOUNT),
+    ).rejects.toThrow(/TLS not available/);
+    // The refusal path must not leak the plaintext socket (same pattern as
+    // the auth test): it closes promptly instead of lingering until the
+    // inactivity timeout.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(server.socketClosed).toBe(true);
+    server.close();
+  });
+
+  it("sends the configured hostname as SNI (liveness canary for the capture)", async () => {
+    // Proves the SNICallback capture is LIVE: a DNS-name host legitimately
+    // sends SNI, and the callback must observe it. Without this arm a dead
+    // capture mechanism (like the earlier 'data' spy) would let the IP pin
+    // above pass vacuously.
+    // literalCapName additionally exercises the post-STARTTLS greeting
+    // REPLACEMENT path (§2.2) with a literal capability name — connect must
+    // succeed and the replaced list must contain SIEVE.
+    const server = new FakeManageSieveServer("starttls");
+    server.literalCapName = true;
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "localhost", port, secure: "starttls" },
+        TEST_ACCOUNT,
+        false, // self-signed test fixture
+      );
+      expect(server.helloSni).toBe("localhost");
+      expect(client.capabilities).not.toContain("STARTTLS");
+      expect(client.capabilities).toContain("SIEVE");
+      expect(client.capabilities).toContain("fileinto");
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+
+  it("sends STARTTLS first, consumes the re-issued greeting, then works", async () => {
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "starttls" },
+        TEST_ACCOUNT,
+        false, // self-signed test fixture
+      );
+      // The command went out in plaintext BEFORE the TLS handshake started.
+      expect(server.received).toContain("STARTTLS");
+      expect(server.upgraded).toBe(true);
+      // §2.2: cached capabilities are REPLACED by the post-handshake greeting,
+      // which must NOT advertise STARTTLS any more.
+      expect(client.capabilities).not.toContain("STARTTLS");
+      expect(client.capabilities).toEqual(
+        expect.arrayContaining(["IMPLEMENTATION", "Test Server", "SIEVE", "VERSION", "1.0"]),
+      );
+      // Command/response alignment after the upgrade.
+      const scripts = await client.listScripts();
+      expect(scripts).toEqual([
+        { name: "active", active: true },
+        { name: "vacation", active: false },
+      ]);
+      // RFC 6066: the ClientHello for an IP target must NOT carry the IP
+      // in the ServerNameList (the pre-fix code sent it there and tripped
+      // DEP0123). Fails against servername = IP; with no SNI sent the
+      // callback never fires and helloSni stays null.
+      expect(server.helloSni).not.toBe("127.0.0.1");
+    } finally {
+      // Teardown even on assertion failure — no lingering handles that
+      // would bury the real failure.
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+});
+
+describe("ManageSieveClient implicit TLS (RFC 5804 §1.8)", { timeout: 15_000 }, () => {
+  const server = new FakeManageSieveServer("implicit-tls");
+
+  it("consumes the TLS greeting before sending commands", async () => {
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "tls" },
+        TEST_ACCOUNT,
+        false, // self-signed test fixture
+      );
+      // If the greeting had not been consumed, AUTHENTICATE's response would
+      // be read by LISTSCRIPTS and the list would come back empty.
+      expect(server.received.some((l) => l.startsWith("AUTHENTICATE"))).toBe(true);
+      const scripts = await client.listScripts();
+      expect(scripts).toEqual([
+        { name: "active", active: true },
+        { name: "vacation", active: false },
+      ]);
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+});
+
+describe("ManageSieveClient SNI (implicit TLS)", { timeout: 15_000 }, () => {
+  it("sends the configured hostname in the ClientHello SNI extension", async () => {
+    // RFC 6066: SNI carries DNS hostnames only (never IP literals), so a
+    // hostname host is required to exercise the extension. A raw TCP probe
+    // inspects the plaintext ClientHello — server-side sniCallback via
+    // tls.createServer proved unreliable on Node v24 (the STARTTLS suite
+    // instead captures SNI through SNICallback on a directly-constructed
+    // TLSSocket, which IS honored).
+    let hello = "";
+    const srv = net.createServer((s) => {
+      s.once("data", (chunk: Buffer) => {
+        hello = chunk.toString("latin1");
+        s.destroy();
+      });
+    });
+    const port = await new Promise<number>((resolve) => {
+      srv.listen(0, "127.0.0.1", () => resolve((srv.address() as net.AddressInfo).port));
+    });
+    await ManageSieveClient.connect(
+      { host: "localhost", port, secure: "tls" },
+      TEST_ACCOUNT,
+      false,
+    ).then(
+      () => {
+        throw new Error("TLS handshake should not succeed against a raw probe");
+      },
+      () => {}, // handshake failure is expected; the probe already has the bytes
+    );
+    srv.close();
+    expect(hello).toContain("localhost");
+  });
+
+  it("never sends IP literals in SNI (RFC 6066 future-proofing)", async () => {
+    // Node v24 sends no SNI at all when servername is unset or an IP — this
+    // passed before the SNI fix too, so it is a CANARY, not the load-bearing
+    // pin (that is the 'localhost' probe above). It keeps the contract: even
+    // if a future runtime starts deriving host→SNI, an IP host must never
+    // put the IP into the ServerNameList.
+    let hello = "";
+    const srv = net.createServer((s) => {
+      s.once("data", (chunk: Buffer) => {
+        hello = chunk.toString("latin1");
+        s.destroy();
+      });
+    });
+    const port = await new Promise<number>((resolve) => {
+      srv.listen(0, "127.0.0.1", () => resolve((srv.address() as net.AddressInfo).port));
+    });
+    await ManageSieveClient.connect(
+      { host: "127.0.0.1", port, secure: "tls" },
+      TEST_ACCOUNT,
+      false,
+    ).then(
+      () => {
+        throw new Error("TLS handshake should not succeed against a raw probe");
+      },
+      () => {},
+    );
+    srv.close();
+    // RFC 6066: SNI carries DNS hostnames only — an IP-literal host must
+    // not appear in the ServerNameList.
+    expect(hello).not.toContain("127.0.0.1");
+  });
+});
+
+describe("ManageSieveClient literal-name safety", { timeout: 15_000 }, () => {
+  it("a script named NO arrives as data, not as a refusal", async () => {
+    const server = new FakeManageSieveServer("plain");
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "plain" },
+        TEST_ACCOUNT,
+      );
+      server.listScriptsResponse = '{2}\r\nNO\r\nOK "listed"\r\n';
+      const scripts = await client.listScripts();
+      expect(scripts).toEqual([{ name: "NO", active: false }]);
+      await client.close();
+      // The dialogue stayed aligned end-to-end: LOGOUT's OK was the final
+      // exchange, with no stale response left pending in the buffer.
+      expect(server.received[server.received.length - 1]).toBe("LOGOUT");
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+
+  it("a script named OK arrives as data, not as a completion", async () => {
+    const server = new FakeManageSieveServer("plain");
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "plain" },
+        TEST_ACCOUNT,
+      );
+      server.listScriptsResponse = '{2}\r\nOK\r\nOK\r\n';
+      const scripts = await client.listScripts();
+      expect(scripts).toEqual([{ name: "OK", active: false }]);
+      await client.close();
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+});

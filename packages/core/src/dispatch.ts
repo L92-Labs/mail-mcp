@@ -46,11 +46,18 @@ import {
   modifyEmailsSchema,
   respondEmailSchema,
   sendEmailSchema,
+  sieveScriptActivateSchema,
+  sieveScriptCheckSchema,
+  sieveScriptDeleteSchema,
+  sieveScriptGetSchema,
+  sieveScriptsListSchema,
+  sieveScriptPutSchema,
   toolsForMode,
   type ToolName,
 } from "./schemas.js";
 import type {
   CacheStore,
+  SieveBackend,
   CursorStore,
   EmailAccount,
   EmailDetail,
@@ -63,6 +70,8 @@ import type {
 export type DispatchContext = {
   config: RuntimeConfig;
   backend: MailBackend;
+  /** ManageSieve operations; sieve_* tools require it. */
+  sieve?: SieveBackend;
   cache?: CacheStore;
   cursors: CursorStore;
 };
@@ -75,6 +84,8 @@ export type ToolMeta = {
   readOnly: boolean;
   /** True when the tool removes data irreversibly (destructiveHint for MCP clients). */
   destructive?: boolean;
+  /** Only registered when the ManageSieve endpoint is configured (SIEVE_HOST). */
+  sieveOnly?: boolean;
 };
 
 export const TOOL_META: ToolMeta[] = [
@@ -175,11 +186,64 @@ export const TOOL_META: ToolMeta[] = [
     inputSchema: respondEmailSchema,
     readOnly: false,
   },
+  {
+    name: "sieve_scripts_list",
+    title: "List Sieve scripts",
+    description:
+      "List the account's Sieve scripts (ManageSieve) with the active one marked. Requires SIEVE_HOST to be configured.",
+    inputSchema: sieveScriptsListSchema,
+    readOnly: true,
+    sieveOnly: true,
+  },
+  {
+    name: "sieve_script_get",
+    title: "Read Sieve script",
+    description:
+      "Read a Sieve script's full source by exact name (use sieve_scripts_list for stored names and which one is active).",
+    inputSchema: sieveScriptGetSchema,
+    readOnly: true,
+    sieveOnly: true,
+  },
+  {
+    name: "sieve_script_put",
+    title: "Save Sieve script",
+    description:
+      "Save a Sieve script under `name` (convention: `active` for the account's primary script). Server-side validation (CHECKSCRIPT) runs first unless validate is false; invalid scripts are reported and NOT saved.",
+    inputSchema: sieveScriptPutSchema,
+    readOnly: false,
+    sieveOnly: true,
+  },
+  {
+    name: "sieve_script_check",
+    title: "Validate Sieve script",
+    description: "Validate Sieve script source server-side without saving. Returns OK or the errors.",
+    inputSchema: sieveScriptCheckSchema,
+    readOnly: true,
+    sieveOnly: true,
+  },
+  {
+    name: "sieve_script_activate",
+    title: "Activate Sieve script",
+    description: "Make a Sieve script the account's active script.",
+    inputSchema: sieveScriptActivateSchema,
+    readOnly: false,
+    sieveOnly: true,
+  },
+  {
+    name: "sieve_script_delete",
+    title: "Delete Sieve script",
+    description:
+      "Delete a Sieve script. Requires confirm: true; deleting the currently active script is refused (activate another script first).",
+    inputSchema: sieveScriptDeleteSchema,
+    readOnly: false,
+    destructive: true,
+    sieveOnly: true,
+  },
 ];
 
 export function enabledToolMeta(config: RuntimeConfig): ToolMeta[] {
   const allowed = new Set(toolsForMode(config.mode));
-  return TOOL_META.filter((t) => allowed.has(t.name));
+  return TOOL_META.filter((t) => allowed.has(t.name) && (!t.sieveOnly || Boolean(config.sieve)));
 }
 
 // ---------- helpers ----------
@@ -249,6 +313,11 @@ async function specialFolder(
   if (kind === "sent" && account.sentFolder) return account.sentFolder;
   if (kind === "drafts" && account.draftsFolder) return account.draftsFolder;
   return resolveSpecialFolder(await listFolders(ctx, account), kind);
+}
+
+function requireSieve(ctx: DispatchContext): SieveBackend {
+  if (!ctx.sieve) throw new Error("sieve is not configured (set SIEVE_HOST)");
+  return ctx.sieve;
 }
 
 function resolveMoveTarget(folders: FolderInfo[], value: string): string {
@@ -645,6 +714,60 @@ export async function dispatchTool(
       });
       await bumpCache(ctx, account);
       return { ...result, moved_to: moveTo ?? null, skipped };
+    }
+
+    case "sieve_scripts_list": {
+      const sieve = requireSieve(ctx);
+      const parsed = sieveScriptsListSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      return { scripts: await sieve.listScripts(account) };
+    }
+
+    case "sieve_script_get": {
+      const sieve = requireSieve(ctx);
+      const parsed = sieveScriptGetSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      return { name: parsed.name, script: await sieve.getScript(account, parsed.name) };
+    }
+
+    case "sieve_script_put": {
+      const sieve = requireSieve(ctx);
+      const parsed = sieveScriptPutSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      if (parsed.validate !== false) {
+        const check = await sieve.checkScript(account, parsed.content);
+        if (!check.valid) {
+          throw new Error(`Sieve script is invalid — not saved: ${check.errors ?? "syntax error"}`);
+        }
+      }
+      const warnings = await sieve.putScript(account, parsed.name, parsed.content);
+      return { saved: true, name: parsed.name, ...(warnings ? { warnings } : {}) };
+    }
+
+    case "sieve_script_check": {
+      const sieve = requireSieve(ctx);
+      const parsed = sieveScriptCheckSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      return await sieve.checkScript(account, parsed.content);
+    }
+
+    case "sieve_script_activate": {
+      const sieve = requireSieve(ctx);
+      const parsed = sieveScriptActivateSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      await sieve.setActive(account, parsed.name);
+      return { activated: true, name: parsed.name };
+    }
+
+    case "sieve_script_delete": {
+      const sieve = requireSieve(ctx);
+      const parsed = sieveScriptDeleteSchema.parse(args ?? {});
+      const account = resolveAccount(ctx.config, parsed.account_name);
+      if (parsed.confirm !== true) {
+        throw new Error("sieve_script_delete requires confirm: true");
+      }
+      await sieve.deleteScript(account, parsed.name);
+      return { deleted: true, name: parsed.name };
     }
 
     case "emails_events": {

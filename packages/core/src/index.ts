@@ -6,3 +6,4 @@ export * from "./schemas.js";
 export * from "./dispatch.js";
 export * from "./compose.js";
 export * from "./folders.js";
+export * from "./sieve.js";

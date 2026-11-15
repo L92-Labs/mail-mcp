@@ -15,6 +15,10 @@ import { kvCache, kvCursors } from "./kv.js";
 
 function createContext(env: WorkerEnv): DispatchContext {
   const config = loadRuntimeConfig(envToMap(env));
+  // ManageSieve needs raw TCP + STARTTLS, which the Workers runtime does not
+  // support in this version — never register the sieve tools here, even if
+  // SIEVE_HOST is present in the environment.
+  config.sieve = undefined;
   return {
     config,
     backend: createWorkerBackend(),

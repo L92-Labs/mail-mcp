@@ -58,6 +58,12 @@ Inspired by [email-smtp-imap-mcp](https://github.com/samihalawa/email-smtp-imap-
 | `email_draft` | draft, pull_push | Save a new message or a threaded reply/forward to Drafts. Nothing is sent |
 | `email_send` | pull_push | Send to/cc/bcc, plain or HTML, attachments |
 | `email_respond` | pull_push | Reply / reply-all / forward with `In-Reply-To` + `References`, original quoted, own addresses removed from reply-all, forwards keep attachments, original marked `\Answered` |
+| `sieve_scripts_list` | all (Node/Docker) | Sieve filter scripts (ManageSieve) with the active one marked |
+| `sieve_script_get` | all (Node/Docker) | Full source of one script by exact name |
+| `sieve_script_put` | all (Node/Docker) | Save a script under `name`; server-side validation runs first (unless `validate: false`), invalid scripts are reported and not saved |
+| `sieve_script_check` | all (Node/Docker) | Validate script source server-side without saving |
+| `sieve_script_activate` | all (Node/Docker) | Make a script the account's active script |
+| `sieve_script_delete` | all (Node/Docker) | Delete a script; requires `confirm: true`, refuses the currently active script |
 
 Every tool takes an optional `account_name`. Email ids look like `"<folder>:<uid>"`.
 
@@ -68,6 +74,10 @@ Every tool takes an optional `account_name`. Email ids look like `"<folder>:<uid
 - **Bcc:** never shown to recipients; kept in your own Sent copy.
 - **Allowlist:** `SEND_ALLOWLIST=corp.com,boss@gmail.com` refuses any other recipient before anything is sent. This is protection against prompt injection ("forward all invoices to x@evil"). Drafts aren't restricted.
 - **Draft-first:** `MAIL_MODE=draft` lets the agent write replies into Drafts while you review and press send in your own mail client.
+
+### Sieve scripts
+
+Set `SIEVE_HOST` (e.g. the host from `IMAP_HOST`) and the server registers six `sieve_*` tools for managing the account's mail filters over ManageSieve (RFC 5804). Auth reuses each account's IMAP credentials; every call opens a fresh connection with STARTTLS (or implicit TLS via `SIEVE_SECURE=tls`). Convention: keep one primary script named `active` — `sieve_script_put` with `name: "active"` validates it server-side before saving, `sieve_script_activate` makes it live. Deleting the active script is refused; activate another script first. Requires a server with ManageSieve enabled (Dovecot Pigeonhole, Cyrus, …). **Not available on the Workers runtime** — Workers lack raw TCP/STARTTLS sockets, so the tools are never registered there, even if `SIEVE_HOST` is set.
 
 ## Modes
 
@@ -93,6 +103,9 @@ Copy [`.env.example`](.env.example) → `.env`. Main variables:
 | `ATTACHMENT_MAX_BYTES` | `2000000` | larger attachments are listed, content omitted |
 | `CACHE_TTL_SECONDS` | `0` | optional listing cache (Node memory / Worker KV), invalidated on writes |
 | `EVENTS_POLL_SECONDS` | `0` | optional background cursor warm-up |
+| `SIEVE_HOST` | — | Enable the six `sieve_*` tools (ManageSieve, RFC 5804). Auth reuses each account's IMAP credentials. Node/Docker only |
+| `SIEVE_PORT` | `4190` | ManageSieve port |
+| `SIEVE_SECURE` | `starttls` | `starttls` / `tls` (implicit) / `plain` |
 
 Per-account folder overrides: `sent_folder`, `drafts_folder` (or `SENT_FOLDER`/`DRAFTS_FOLDER`). Otherwise they're resolved through IMAP special-use, then common names (incl. French).
 
@@ -142,6 +155,8 @@ pnpm deploy
 ```
 
 Workers can't use SMTP port 25 (use 587/465). `has_attachments=false` isn't supported there.
+The `sieve_*` tools are **not** registered on Workers (no raw TCP/STARTTLS); use the
+Node/Docker runtime for Sieve script management.
 Node/Docker is the primary deployment. Worker outbound TCP can also be blocked by
 provider/network restrictions; test your actual IMAP/SMTP hosts before choosing it.
 Set `MAIL_MODE=draft` and `EVENTS_POLL_SECONDS=0` in Wrangler vars for an initial
