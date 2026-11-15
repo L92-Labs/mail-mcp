@@ -134,7 +134,15 @@ export class ManageSieveClient {
     const pass = account.imap.password;
     const authzid = "";
     const plain = Buffer.from(`${authzid}\0${user}\0${pass}`, "utf8").toString("base64");
-    await client.command(`AUTHENTICATE "PLAIN" "${plain}"`);
+    try {
+      await client.command(`AUTHENTICATE "PLAIN" "${plain}"`);
+    } catch (err) {
+      // A rejected AUTHENTICATE leaves the connection open server-side —
+      // destroy it instead of letting bad-credential retries accumulate
+      // sockets until the inactivity timeout.
+      client.destroy();
+      throw err;
+    }
     return client;
   }
 

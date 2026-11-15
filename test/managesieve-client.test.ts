@@ -36,6 +36,10 @@ class FakeManageSieveServer {
   nonexistentDelete = false;
   /** CHECKSCRIPT replies NO with a multiline literal error (§2.12). */
   multilineCheckError = false;
+  /** AUTHENTICATE is refused with NO (connection stays open server-side). */
+  rejectAuth = false;
+  /** True once the current connection's socket closed. */
+  socketClosed = false;
   /** CHECKSCRIPT replies NO whose literal message ends in "{N}". */
   messageEndsWithBrace = false;
 
@@ -55,6 +59,9 @@ class FakeManageSieveServer {
 
   private attach(socket: net.Socket): void {
     socket.write(this.greeting());
+    socket.on("close", () => {
+      this.socketClosed = true;
+    });
     socket.on("data", (chunk: Buffer) => {
       this.buffer += chunk.toString("utf8");
       this.processBuffer(socket);
@@ -100,6 +107,10 @@ class FakeManageSieveServer {
       return;
     }
     if (line.startsWith("AUTHENTICATE")) {
+      if (this.rejectAuth) {
+        socket.write('NO (AUTHFAILED) "bad credentials"\r\n');
+        return;
+      }
       socket.write('OK "authenticated"\r\n');
       return;
     }
@@ -338,6 +349,20 @@ describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
 
   it("LOGOUT closes the connection", async () => {
     await client.close();
+  });
+  it("destroys the connection when AUTHENTICATE is refused", async () => {
+    const server = new FakeManageSieveServer("plain");
+    server.rejectAuth = true;
+    const port = await server.listen();
+    await expect(
+      ManageSieveClient.connect({ host: "127.0.0.1", port, secure: "plain" }, TEST_ACCOUNT),
+    ).rejects.toThrow(/bad credentials/);
+    // The client destroyed the socket instead of letting it linger until
+    // the inactivity timeout — repeated bad-credential calls cannot
+    // accumulate connections.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(server.socketClosed).toBe(true);
+    server.close();
   });
 });
 
