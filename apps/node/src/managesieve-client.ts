@@ -77,6 +77,7 @@ export class ManageSieveClient {
     config: SieveConfig,
     account: EmailAccount,
     tlsVerify = true,
+    ca?: string,
   ): Promise<ManageSieveClient> {
     let client: ManageSieveClient;
     if (config.secure === "tls") {
@@ -85,10 +86,15 @@ export class ManageSieveClient {
       const secure = tls.connect({
         host: config.host,
         port: config.port,
-        // SNI — tls.connect does not derive it from host. RFC 6066 forbids
-        // IP literals in the ServerNameList, so DNS names only.
+        // SNI — tls.connect does not derive servername from host at all
+        // (probed on Node v24: no SNI is sent for DNS *or* IP hosts unless
+        // servername is set explicitly). Set it for DNS hosts so SNI-routing
+        // endpoints select the right certificate. RFC 6066 forbids IP
+        // literals in the ServerNameList — the explicit undefined keeps IP
+        // hosts SNI-free even on runtimes that would default host→SNI.
         servername: net.isIP(config.host) ? undefined : config.host,
         rejectUnauthorized: tlsVerify,
+        ca: ca ? [ca] : undefined,
       });
       client = new ManageSieveClient(secure, config.host);
       await client.waitConnected();
@@ -112,7 +118,7 @@ export class ManageSieveClient {
         }
         try {
           await client.command("STARTTLS");
-          await client.startTls(tlsVerify);
+          await client.startTls(tlsVerify, ca);
           // §2.2: the server re-issues its capability greeting immediately
           // after the handshake (verified against Dovecot Pigeonhole: the
           // fresh list drops STARTTLS and widens SASL).
@@ -272,7 +278,7 @@ export class ManageSieveClient {
   }
 
   /** Upgrade the plain socket to TLS (STARTTLS), re-attaching listeners. */
-  private startTls(tlsVerify: boolean): Promise<void> {
+  private startTls(tlsVerify: boolean, ca?: string): Promise<void> {
     const host = this.host;
     const plain = this.socket;
     plain.setTimeout(0);
@@ -296,9 +302,13 @@ export class ManageSieveClient {
       const secure = tls.connect(
         {
           socket: plain,
-          // SNI for DNS hosts; RFC 6066 forbids IP literals in SNI.
+          // Certificate identity: without host, an IP target would be
+          // verified against "localhost" and fail; servername stays
+          // undefined for IPs (RFC 6066) and SNI is never sent for them.
+          host,
           servername: net.isIP(host) ? undefined : host,
           rejectUnauthorized: tlsVerify,
+          ca: ca ? [ca] : undefined,
         },
         () => {
           clearTimeout(timer);

@@ -6,6 +6,7 @@ import { ManageSieveClient } from "../apps/node/src/managesieve-client.js";
 
 const TLS_KEY = fs.readFileSync(new URL("./fixtures/managesieve-tls.key", import.meta.url), "utf8");
 const TLS_CERT = fs.readFileSync(new URL("./fixtures/managesieve-tls.crt", import.meta.url), "utf8");
+const TLS_CA = fs.readFileSync(new URL("./fixtures/managesieve-test-ca.crt", import.meta.url), "utf8");
 const SECURE_CONTEXT = tls.createSecureContext({ key: TLS_KEY, cert: TLS_CERT });
 const TEST_ACCOUNT = { imap: { user: "me@loiu92.com", password: "pw" } } as never;
 
@@ -369,6 +370,28 @@ describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
 describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_000 }, () => {
   const server = new FakeManageSieveServer("starttls");
 
+  it("verifies the certificate against the target IP (host passed to the upgrade)", async () => {
+    // The fixture cert carries ONLY an IP:127.0.0.1 SAN (CN is unmatchable),
+    // and verification is ON: if the upgrade omitted host, identity would
+    // fall back to "localhost" and fail — so this exact success pins the
+    // IP-target verification path.
+    const server = new FakeManageSieveServer("starttls");
+    const port = await server.listen();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "starttls" },
+        TEST_ACCOUNT,
+        true,
+        TLS_CA,
+      );
+      expect(server.upgraded).toBe(true);
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
+  });
+
   it("sends STARTTLS first, consumes the re-issued greeting, then works", async () => {
     const port = await server.listen();
     let client: ManageSieveClient | null = null;
@@ -459,7 +482,12 @@ describe("ManageSieveClient SNI (implicit TLS)", { timeout: 15_000 }, () => {
     expect(hello).toContain("localhost");
   });
 
-  it("does not send SNI for IP-literal hosts (RFC 6066)", async () => {
+  it("never sends IP literals in SNI (RFC 6066 future-proofing)", async () => {
+    // Node v24 sends no SNI at all when servername is unset or an IP — this
+    // passed before the SNI fix too, so it is a CANARY, not the load-bearing
+    // pin (that is the 'localhost' probe above). It keeps the contract: even
+    // if a future runtime starts deriving host→SNI, an IP host must never
+    // put the IP into the ServerNameList.
     let hello = "";
     const srv = net.createServer((s) => {
       s.once("data", (chunk: Buffer) => {
