@@ -110,12 +110,18 @@ export class ManageSieveClient {
             `ManageSieve server ${config.host}:${config.port} does not advertise STARTTLS`,
           );
         }
-        await client.command("STARTTLS");
-        await client.startTls(tlsVerify);
-        // §2.2: the server re-issues its capability greeting immediately
-        // after the handshake (verified against Dovecot Pigeonhole: the
-        // fresh list drops STARTTLS and widens SASL).
-        await client.readGreeting();
+        try {
+          await client.command("STARTTLS");
+          await client.startTls(tlsVerify);
+          // §2.2: the server re-issues its capability greeting immediately
+          // after the handshake (verified against Dovecot Pigeonhole: the
+          // fresh list drops STARTTLS and widens SASL).
+          await client.readGreeting();
+        } catch (err) {
+          // A refusal (NO) or handshake failure must not leak the socket.
+          client.destroy();
+          throw err;
+        }
       }
     }
     if (!client.capabilities.some((c) => c.toUpperCase() === "SIEVE")) {
@@ -266,17 +272,37 @@ export class ManageSieveClient {
     plain.removeAllListeners("data");
     plain.removeAllListeners("error");
     plain.removeAllListeners("close");
+    // A TLS ServerHello may already sit in the buffer, coalesced into the
+    // same TCP chunk as the STARTTLS OK — re-inject it into the socket
+    // instead of discarding, or the handshake stalls waiting for bytes
+    // that will never arrive.
+    if (this.buffer.length > 0) plain.unshift(this.buffer);
     this.buffer = Buffer.alloc(0);
     return new Promise((resolve, reject) => {
+      // The handshake has no socket timeout attached (listeners are
+      // detached) — bound it explicitly.
+      const timer = setTimeout(
+        () => reject(new Error(`TLS handshake timeout: ${host}`)),
+        INACTIVITY_TIMEOUT_MS,
+      );
       const secure = tls.connect(
-        { socket: plain, servername: host, rejectUnauthorized: tlsVerify },
+        {
+          socket: plain,
+          // SNI for DNS hosts; RFC 6066 forbids IP literals in SNI.
+          servername: net.isIP(host) ? undefined : host,
+          rejectUnauthorized: tlsVerify,
+        },
         () => {
+          clearTimeout(timer);
           this.socket = secure;
           this.attach();
           resolve();
         },
       );
-      secure.once("error", (err: Error) => reject(err));
+      secure.once("error", (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
     });
   }
 

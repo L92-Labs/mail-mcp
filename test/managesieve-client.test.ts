@@ -346,28 +346,34 @@ describe("ManageSieveClient STARTTLS upgrade (RFC 5804 §2.2)", { timeout: 15_00
 
   it("sends STARTTLS first, consumes the re-issued greeting, then works", async () => {
     const port = await server.listen();
-    const client = await ManageSieveClient.connect(
-      { host: "127.0.0.1", port, secure: "starttls" },
-      TEST_ACCOUNT,
-      false, // self-signed test fixture
-    );
-    // The command went out in plaintext BEFORE the TLS handshake started.
-    expect(server.received).toContain("STARTTLS");
-    expect(server.upgraded).toBe(true);
-    // §2.2: cached capabilities are REPLACED by the post-handshake greeting,
-    // which must NOT advertise STARTTLS any more.
-    expect(client.capabilities).not.toContain("STARTTLS");
-    expect(client.capabilities).toEqual(
-      expect.arrayContaining(["IMPLEMENTATION", "Test Server", "SIEVE", "VERSION", "1.0"]),
-    );
-    // Command/response alignment after the upgrade.
-    const scripts = await client.listScripts();
-    expect(scripts).toEqual([
-      { name: "active", active: true },
-      { name: "vacation", active: false },
-    ]);
-    await client.close();
-    server.close();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "starttls" },
+        TEST_ACCOUNT,
+        false, // self-signed test fixture
+      );
+      // The command went out in plaintext BEFORE the TLS handshake started.
+      expect(server.received).toContain("STARTTLS");
+      expect(server.upgraded).toBe(true);
+      // §2.2: cached capabilities are REPLACED by the post-handshake greeting,
+      // which must NOT advertise STARTTLS any more.
+      expect(client.capabilities).not.toContain("STARTTLS");
+      expect(client.capabilities).toEqual(
+        expect.arrayContaining(["IMPLEMENTATION", "Test Server", "SIEVE", "VERSION", "1.0"]),
+      );
+      // Command/response alignment after the upgrade.
+      const scripts = await client.listScripts();
+      expect(scripts).toEqual([
+        { name: "active", active: true },
+        { name: "vacation", active: false },
+      ]);
+    } finally {
+      // Teardown even on assertion failure — no lingering handles that
+      // would bury the real failure.
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
   });
 });
 
@@ -376,21 +382,25 @@ describe("ManageSieveClient implicit TLS (RFC 5804 §1.8)", { timeout: 15_000 },
 
   it("consumes the TLS greeting before sending commands", async () => {
     const port = await server.listen();
-    const client = await ManageSieveClient.connect(
-      { host: "127.0.0.1", port, secure: "tls" },
-      TEST_ACCOUNT,
-      false, // self-signed test fixture
-    );
-    // If the greeting had not been consumed, AUTHENTICATE's response would
-    // be read by LISTSCRIPTS and the list would come back empty.
-    expect(server.received.some((l) => l.startsWith("AUTHENTICATE"))).toBe(true);
-    const scripts = await client.listScripts();
-    expect(scripts).toEqual([
-      { name: "active", active: true },
-      { name: "vacation", active: false },
-    ]);
-    await client.close();
-    server.close();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "tls" },
+        TEST_ACCOUNT,
+        false, // self-signed test fixture
+      );
+      // If the greeting had not been consumed, AUTHENTICATE's response would
+      // be read by LISTSCRIPTS and the list would come back empty.
+      expect(server.received.some((l) => l.startsWith("AUTHENTICATE"))).toBe(true);
+      const scripts = await client.listScripts();
+      expect(scripts).toEqual([
+        { name: "active", active: true },
+        { name: "vacation", active: false },
+      ]);
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
   });
 });
 
@@ -456,31 +466,41 @@ describe("ManageSieveClient literal-name safety", { timeout: 15_000 }, () => {
   it("a script named NO arrives as data, not as a refusal", async () => {
     const server = new FakeManageSieveServer("plain");
     const port = await server.listen();
-    const client = await ManageSieveClient.connect(
-      { host: "127.0.0.1", port, secure: "plain" },
-      TEST_ACCOUNT,
-    );
-    server.listScriptsResponse = '{2}\r\nNO\r\nOK "listed"\r\n';
-    const scripts = await client.listScripts();
-    expect(scripts).toEqual([{ name: "NO", active: false }]);
-    await client.close();
-    // The dialogue stayed aligned end-to-end: LOGOUT's OK was the final
-    // exchange, with no stale response left pending in the buffer.
-    expect(server.received[server.received.length - 1]).toBe("LOGOUT");
-    server.close();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "plain" },
+        TEST_ACCOUNT,
+      );
+      server.listScriptsResponse = '{2}\r\nNO\r\nOK "listed"\r\n';
+      const scripts = await client.listScripts();
+      expect(scripts).toEqual([{ name: "NO", active: false }]);
+      await client.close();
+      // The dialogue stayed aligned end-to-end: LOGOUT's OK was the final
+      // exchange, with no stale response left pending in the buffer.
+      expect(server.received[server.received.length - 1]).toBe("LOGOUT");
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
   });
 
   it("a script named OK arrives as data, not as a completion", async () => {
     const server = new FakeManageSieveServer("plain");
     const port = await server.listen();
-    const client = await ManageSieveClient.connect(
-      { host: "127.0.0.1", port, secure: "plain" },
-      TEST_ACCOUNT,
-    );
-    server.listScriptsResponse = '{2}\r\nOK\r\nOK\r\n';
-    const scripts = await client.listScripts();
-    expect(scripts).toEqual([{ name: "OK", active: false }]);
-    await client.close();
-    server.close();
+    let client: ManageSieveClient | null = null;
+    try {
+      client = await ManageSieveClient.connect(
+        { host: "127.0.0.1", port, secure: "plain" },
+        TEST_ACCOUNT,
+      );
+      server.listScriptsResponse = '{2}\r\nOK\r\nOK\r\n';
+      const scripts = await client.listScripts();
+      expect(scripts).toEqual([{ name: "OK", active: false }]);
+      await client.close();
+    } finally {
+      await client?.close().catch(() => client!.destroy());
+      server.close();
+    }
   });
 });
