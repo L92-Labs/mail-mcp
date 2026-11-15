@@ -23,6 +23,12 @@ const INACTIVITY_TIMEOUT_MS = 20_000;
 /** A single ManageSieve command exchange: untagged lines + tagged result. */
 interface SieveResult {
   untagged: string[];
+  /** Parallel to untagged: true when the line was assembled from a leading
+   *  synchronised literal (RFC 5804 §2.7/§2.9) — the exact literal bytes
+   *  are in literalValues[i], the line remainder in untagged[i]. */
+  fromLiteral: boolean[];
+  /** Exact literal byte content for entries flagged in fromLiteral. */
+  literalValues: string[];
   /** The raw tagged line (e.g. `OK "done"`) — apply isSieveOk/isSieveNo. */
   tagged: string;
   /** Human-readable text extracted from the tagged line. */
@@ -76,7 +82,14 @@ export class ManageSieveClient {
     if (config.secure === "tls") {
       // Implicit TLS: encrypt BEFORE reading the greeting (a plaintext
       // connect would deadlock — the server waits for a ClientHello).
-      const secure = tls.connect({ host: config.host, port: config.port, rejectUnauthorized: tlsVerify });
+      const secure = tls.connect({
+        host: config.host,
+        port: config.port,
+        // SNI — tls.connect does not derive it from host. RFC 6066 forbids
+        // IP literals in the ServerNameList, so DNS names only.
+        servername: net.isIP(config.host) ? undefined : config.host,
+        rejectUnauthorized: tlsVerify,
+      });
       client = new ManageSieveClient(secure, config.host);
       await client.waitConnected();
       await client.readGreeting();
@@ -124,18 +137,30 @@ export class ManageSieveClient {
   async listScripts(): Promise<SieveScriptSummary[]> {
     const res = await this.command("LISTSCRIPTS");
     const out: SieveScriptSummary[] = [];
-    for (const line of res.untagged) {
+    res.untagged.forEach((line, i) => {
+      if (res.fromLiteral[i]) {
+        // Literal-assembled entry: the name is EXACTLY the literal bytes —
+        // " ACTIVE" may belong to the name itself, so the active marker is
+        // parsed only from the remainder (untagged[i]), never from the
+        // concatenated bytes (RFC 5804 §2.7).
+        const active = /\s+ACTIVE$/i.exec(res.untagged[i]) !== null;
+        out.push({ name: res.literalValues[i], active });
+        return;
+      }
       const entry = parseListScriptsEntry(line);
       if (entry) out.push(entry);
-    }
+    });
     return out;
   }
 
   async getScript(name: string): Promise<string> {
     const res = await this.command("GETSCRIPT ", namePart(name));
-    // RFC 5804 §2.9: the script arrives as a literal; readTagged has already
-    // decoded the bytes into untagged[0].
-    return res.untagged[0] ?? "";
+    if (res.fromLiteral[0]) return res.literalValues[0];
+    // RFC 5804 §4: sieve-script is a string — a server MAY answer short
+    // scripts as a quoted string; decode it like any quoted value.
+    const line = res.untagged[0] ?? "";
+    const quoted = /^"((?:[^"\\]|\\.)*)"$/.exec(line.trim());
+    return quoted ? unescapeSieveString(quoted[1]) : line;
   }
 
   async putScript(name: string, content: string): Promise<string | undefined> {
@@ -292,12 +317,25 @@ export class ManageSieveClient {
    *  script named "OK" or "NO" cannot corrupt the response stream. */
   private async readTagged(): Promise<SieveResult> {
     const untagged: string[] = [];
+    const fromLiteral: boolean[] = [];
+    const literalValues: string[] = [];
+    const push = (line: string, literalValue?: string) => {
+      untagged.push(line);
+      fromLiteral.push(literalValue !== undefined);
+      literalValues.push(literalValue ?? "");
+    };
     for (;;) {
       let line = await this.readLine();
       const literal = /^\{(\d+)\}$/.exec(line);
       if (literal) {
+        // Leading synchronised literal: pure data (LISTSCRIPTS names,
+        // GETSCRIPT content — RFC 5804 §2.7/§2.9). Never classified as a
+        // tagged result. untagged[i] holds ONLY the line remainder; the
+        // exact byte boundary stays in literalValues[i] so a name like
+        // "foo ACTIVE" is never confused with the ACTIVE marker.
         const bytes = await this.readLiteralBytes(Number(literal[1]));
-        untagged.push(bytes + (await this.readLine()));
+        const rest = await this.readLine();
+        push(rest, bytes);
         continue;
       }
       // Trailing literal: a tagged line whose human-readable message travels
@@ -315,9 +353,15 @@ export class ManageSieveClient {
       }
       if (isSieveOk(line) || isSieveNo(line)) {
         const rest = line.trim().split(/\s+(.*)$/s)[1] ?? "";
-        return { untagged, tagged: line.trim(), message: sieveTaggedMessage(rest) };
+        return {
+          untagged,
+          fromLiteral,
+          literalValues,
+          tagged: line.trim(),
+          message: sieveTaggedMessage(rest),
+        };
       }
-      untagged.push(line);
+      push(line);
     }
   }
 

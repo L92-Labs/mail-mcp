@@ -26,6 +26,10 @@ class FakeManageSieveServer {
   invalidMarker = "";
   /** LISTSCRIPTS replies with a synchronised-literal script name. */
   literalListName = false;
+  /** Override for the raw LISTSCRIPTS wire response. */
+  listScriptsResponse: string | null = null;
+  /** Override for the raw GETSCRIPT wire response. */
+  getScriptResponse: string | null = null;
   /** PUTSCRIPT replies with a WARNINGS response code. */
   warningsOnPut = false;
   /** DELETESCRIPT replies NO with a trailing-literal message (§2.8). */
@@ -111,6 +115,10 @@ class FakeManageSieveServer {
       return;
     }
     if (line.startsWith("GETSCRIPT")) {
+      if (this.getScriptResponse !== null) {
+        socket.write(this.getScriptResponse);
+        return;
+      }
       // Server→client literals are synchronised: {N} CRLF content CRLF.
       const content = 'require ["fileinto"]; keep;\n# demo';
       socket.write(`{${Buffer.byteLength(content)}}\r\n${content}\r\nOK\r\n`);
@@ -252,6 +260,22 @@ describe("ManageSieveClient (fake server, plain)", { timeout: 15_000 }, () => {
     ]);
   });
 
+  it("literal-name bytes are never confused with the ACTIVE marker", async () => {
+    // {10} announces 10 bytes: the NAME is "foo ACTIVE" — the marker is
+    // absent, so the script is inactive and the name keeps its spaces.
+    server.listScriptsResponse = '{10}\r\nfoo ACTIVE\r\nOK\r\n';
+    const scripts = await client.listScripts();
+    server.listScriptsResponse = null;
+    expect(scripts).toEqual([{ name: "foo ACTIVE", active: false }]);
+  });
+
+  it("GETSCRIPT decodes a quoted-script response (RFC 5804 §4 string form)", async () => {
+    server.getScriptResponse = '"keep;"\r\nOK\r\n';
+    const script = await client.getScript("active");
+    server.getScriptResponse = null;
+    expect(script).toBe("keep;");
+  });
+
   it("PUTSCRIPT surfaces the bare (WARNINGS) form per RFC 5804 §2.6", async () => {
     server.warningsOnPut = true;
     const warnings = await client.putScript("active", "keep;");
@@ -349,6 +373,64 @@ describe("ManageSieveClient implicit TLS (RFC 5804 §1.8)", { timeout: 15_000 },
     ]);
     await client.close();
     server.close();
+  });
+});
+
+describe("ManageSieveClient SNI (implicit TLS)", { timeout: 15_000 }, () => {
+  it("sends the configured hostname in the ClientHello SNI extension", async () => {
+    // RFC 6066: SNI carries DNS hostnames only (never IP literals), so a
+    // hostname host is required to exercise the extension. A raw TCP probe
+    // inspects the plaintext ClientHello — Node v24 ignores server-side
+    // sniCallback when a default key/cert context exists.
+    let hello = "";
+    const srv = net.createServer((s) => {
+      s.once("data", (chunk: Buffer) => {
+        hello = chunk.toString("latin1");
+        s.destroy();
+      });
+    });
+    const port = await new Promise<number>((resolve) => {
+      srv.listen(0, "127.0.0.1", () => resolve((srv.address() as net.AddressInfo).port));
+    });
+    await ManageSieveClient.connect(
+      { host: "localhost", port, secure: "tls" },
+      TEST_ACCOUNT,
+      false,
+    ).then(
+      () => {
+        throw new Error("TLS handshake should not succeed against a raw probe");
+      },
+      () => {}, // handshake failure is expected; the probe already has the bytes
+    );
+    srv.close();
+    expect(hello).toContain("localhost");
+  });
+
+  it("does not send SNI for IP-literal hosts (RFC 6066)", async () => {
+    let hello = "";
+    const srv = net.createServer((s) => {
+      s.once("data", (chunk: Buffer) => {
+        hello = chunk.toString("latin1");
+        s.destroy();
+      });
+    });
+    const port = await new Promise<number>((resolve) => {
+      srv.listen(0, "127.0.0.1", () => resolve((srv.address() as net.AddressInfo).port));
+    });
+    await ManageSieveClient.connect(
+      { host: "127.0.0.1", port, secure: "tls" },
+      TEST_ACCOUNT,
+      false,
+    ).then(
+      () => {
+        throw new Error("TLS handshake should not succeed against a raw probe");
+      },
+      () => {},
+    );
+    srv.close();
+    // RFC 6066: SNI carries DNS hostnames only — an IP-literal host must
+    // not appear in the ServerNameList.
+    expect(hello).not.toContain("127.0.0.1");
   });
 });
 
