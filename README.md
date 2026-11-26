@@ -88,12 +88,12 @@ its own Git history.
 
 ## Configure
 
-Use [`.env.example`](.env.example) as the Docker or Node template. Set Worker values in Wrangler vars and secrets. Defaults below are runtime defaults unless the runtime is named.
+Use [`.env.example`](.env.example) as the Docker or Node template. Set Worker values in Wrangler vars and secrets. If you use the single-account `IMAP_*`/`SMTP_*` option instead of `EMAIL_ACCOUNTS_JSON`, remove `DEFAULT_EMAIL_ACCOUNT` from `.env` or set it to `default`: the template sets it to `work` for the JSON example, and the single-account option registers its account as `default`, so leaving it makes startup fail. <!-- source: .env.example:21; packages/core/src/config.ts:199,214-221 --> Defaults below are runtime defaults unless the runtime is named.
 <!-- source: .env.example:1; apps/worker/wrangler.toml:14 -->
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `EMAIL_ACCOUNTS_JSON` | Unset | `{"work":{"imap":{…},"smtp":{…},"default_from_name":"…","sender_emails":[…]}}`; or single-account `IMAP_*`/`SMTP_*` <!-- source: .env.example:41; packages/core/src/config.ts:149 --> |
+| `EMAIL_ACCOUNTS_JSON` | Unset | `{"work":{"imap":{…},"smtp":{…},"default_from_name":"…","sender_emails":[…]}}`; or single-account `IMAP_*`/`SMTP_*` (then remove `DEFAULT_EMAIL_ACCOUNT` or set it to `default`) <!-- source: .env.example:21,41; packages/core/src/config.ts:149,199,214-221 --> |
 | `IMAP_HOST`, `IMAP_PORT`, `IMAP_SECURE`, `IMAP_USER`, `IMAP_PASS` | Port `993`, implicit TLS on by default for port `993` | Single-account IMAP settings. Host, user and password are required. <!-- source: packages/core/src/config.ts:171 --> |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` | Port `587`, implicit TLS on by default for port `465` | Single-account SMTP settings. Required in `pull_push` mode. <!-- source: packages/core/src/config.ts:190; packages/core/src/config.ts:224 --> |
 | `DEFAULT_FROM_NAME`, `SENDER_EMAILS` | Unset | Single-account display name and comma-separated sender addresses. <!-- source: packages/core/src/config.ts:182; .env.example:56 --> |
@@ -199,9 +199,9 @@ The container is read-only, runs as non-root, has a `/health` healthcheck, and d
 
 ## Node / stdio (Claude Desktop, Cursor)
 
-Use Node 22.12.0 or later on the Node 22 line and Corepack. From the repository root, copy `.env.example` to
+Use Node 22.20.0 or later on the Node 22 line and Corepack. From the repository root, copy `.env.example` to
 `.env` and edit the mailbox settings and mode before launching the client.
-<!-- source: CONTRIBUTING.md:3; pnpm-lock.yaml:1852; .env.example:1; apps/node/src/index.ts:7 -->
+<!-- source: CONTRIBUTING.md:3; pnpm-lock.yaml:627-631,118-120,1852; .env.example:1; apps/node/src/index.ts:7 -->
 
 ```bash
 corepack enable
@@ -224,13 +224,13 @@ pnpm build
 
 ## Cloudflare Workers
 
-Use Node 22.12.0 or later on the Node 22 line, Corepack and an authenticated Wrangler session. Replace the KV ID
+Use Node 22.20.0 or later on the Node 22 line, Corepack and an authenticated Wrangler session. Replace the KV ID
 in `wrangler.toml` after creating the namespace. Before setting secrets or deploying,
 update the Wrangler vars to match your accounts and mode. The checked-in
 `DEFAULT_EMAIL_ACCOUNT = "default"` requires an account named `default`. If your
 account JSON uses `work` as in the configuration example, set the var to `"work"`
 or remove it to let the runtime choose.
-<!-- source: CONTRIBUTING.md:3; pnpm-lock.yaml:1852; apps/worker/wrangler.toml:6; apps/worker/wrangler.toml:18; packages/core/src/config.ts:214 -->
+<!-- source: CONTRIBUTING.md:3; pnpm-lock.yaml:627-631,118-120,1852; apps/worker/wrangler.toml:6; apps/worker/wrangler.toml:18; packages/core/src/config.ts:214 -->
 
 ```bash
 corepack enable
@@ -261,10 +261,10 @@ see [event semantics](docs/usage.md#events-and-cache).
 
 ## Test
 
-From a fresh clone, use Node 22.12.0 or later on the Node 22 line and Corepack. The local E2E suite also needs
+From a fresh clone, use Node 22.20.0 or later on the Node 22 line and Corepack. The local E2E suite also needs
 Bash, a running Docker daemon, and free ports (defaults: IMAP `13143`, SMTP
 `13025`, MCP `8797`). Run these from the repo root.
-<!-- source: CONTRIBUTING.md:3; pnpm-lock.yaml:1852; scripts/e2e.sh:11; scripts/e2e.sh:35 -->
+<!-- source: CONTRIBUTING.md:3; pnpm-lock.yaml:627-631,118-120,1852; scripts/e2e.sh:11; scripts/e2e.sh:35 -->
 
 ```bash
 corepack enable
