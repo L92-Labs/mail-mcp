@@ -1,46 +1,118 @@
 # mail-mcp
 
-IMAP/SMTP **MCP** server for L92 Labs. Read, search, organize, draft, send, reply and forward
-across several mailboxes from one MCP endpoint. Stateless, configured entirely by env vars.
+IMAP/SMTP **MCP** server for L92 Labs. Give your MCP client one endpoint to read,
+search, organize, draft, send, reply and forward across several mailboxes.
+The server is stateless and configured entirely through environment variables.
+<!-- source: package.json:5; packages/core/src/dispatch.ts:93; apps/node/src/server.ts:161; docker-compose.yml:1 -->
 
-Start here: [Docker quick start](#quick-start-published-image),
-[tool examples and troubleshooting](docs/usage.md),
-[releases and manual image publishing](docs/releases.md),
-[contributing](CONTRIBUTING.md), [security](SECURITY.md).
+## Quick start: build with Docker
 
-## Quick start: published image
-
-Requires Docker Compose v2. Images become available after the first successful
-publish; public anonymous pulls require the GHCR package to be made public.
+From a fresh clone, run the following in the repository root. You'll need
+Docker with Compose v2 or later and `--wait` support, curl, OpenSSL and IMAP credentials.
+<!-- source: docker-compose.yml:1; docker compose up --help; .env.example:8; .env.example:41; README.md at origin/main:19 -->
 
 ```bash
 cp .env.example .env
-# Edit .env: real mail settings + strong MCP_BEARER_TOKEN; start with MAIL_MODE=draft.
-# Generate a bearer token: openssl rand -hex 32
-docker compose -f docker-compose.image.yml pull
-docker compose -f docker-compose.image.yml up -d
-curl --fail http://127.0.0.1:8787/health
+openssl rand -hex 32
+# Edit .env before starting Compose.
+# Set EMAIL_ACCOUNTS_JSON IMAP values.
+# Paste token into MCP_BEARER_TOKEN.
+# Set MAIL_MODE=draft.
+docker compose up -d --build --wait
+curl --fail \
+  http://127.0.0.1:8787/health
 ```
+<!-- source: .env.example:1; .env.example:3; .env.example:43; README.md at origin/main:17; docker-compose.yml:2; docker-compose.yml:17; docker compose up --help -->
 
 Connect a Streamable HTTP MCP client to `http://127.0.0.1:8787/mcp` with
-`Authorization: Bearer <your-token>`. Remote clients need an HTTPS endpoint;
-use the tunnel recipe below with `-f docker-compose.image.yml`.
-`/health` checks server/config availability, not mailbox connectivity; call
-`accounts_list`, then `folders_list` to verify IMAP access.
+`Authorization: Bearer <MCP_BEARER_TOKEN>`. The health check confirms startup.
+Call `accounts_list`, then `folders_list` to verify IMAP access.
+<!-- source: docker-compose.yml:9; apps/node/src/server.ts:145; docs/usage.md:3 -->
+
+## Install and deploy options
+
+| Option | Entry | Good for |
+|--------|-------|----------|
+| [Docker source build](#quick-start-build-with-docker) | Streamable HTTP `/mcp` | Primary runtime. Run locally or add a Cloudflare Tunnel and MCP portal. <!-- source: docker-compose.yml:1; docker-compose.yml:24; apps/node/src/server.ts:151 --> |
+| [Docker published image](#quick-start-published-image) | Streamable HTTP `/mcp` | Use the same Docker runtime without building the image. <!-- source: docker-compose.image.yml:1; apps/node/src/server.ts:151 --> |
+| [Node / stdio](#node--stdio-claude-desktop-cursor) | stdio | Local clients such as Claude Desktop and Cursor. <!-- source: apps/node/src/index.ts:15; README.md at origin/main:128 --> |
+| [Cloudflare Workers](#cloudflare-workers) | `/mcp` | Hosted MCP with KV cursors and Cron. <!-- source: apps/worker/src/index.ts:37; apps/worker/wrangler.toml:6 --> |
+
+See [tool examples and troubleshooting](docs/usage.md),
+[releases and manual image publishing](docs/releases.md),
+[contributing](CONTRIBUTING.md) and [security](SECURITY.md).
+
+## Quick start: published image
+
+In a fresh clone, follow the [source-build setup](#quick-start-build-with-docker)
+through editing `.env`, then run the commands below. Docker Compose uses the same configuration file.
+The image must already be published. Anonymous pulls require a public GHCR package.
+<!-- source: docker-compose.image.yml:1; docs/releases.md:81 -->
+
+```bash
+docker compose -f docker-compose.image.yml pull
+docker compose -f docker-compose.image.yml up -d --wait
+curl --fail \
+  http://127.0.0.1:8787/health
+```
+<!-- source: README.md at origin/main:20; docker-compose.image.yml:3; Dockerfile:24; docker compose up --help -->
+
+Use the same MCP client settings as for the source build. Remote clients need
+an HTTPS endpoint. Use the [tunnel setup](#deploy-docker--cloudflare-tunnel--mcp-portal)
+with `-f docker-compose.image.yml` after `docker compose` and omit `--build`.
+<!-- source: docker-compose.image.yml:6; docker-compose.image.yml:13; docs/usage.md:3 -->
 
 Set `MAIL_MCP_IMAGE=ghcr.io/l92-labs/mail-mcp:0.2.0` in `.env` to select a
 release, or use `ghcr.io/l92-labs/mail-mcp@sha256:<digest>` for a pinned image.
-Available tags: stable `latest`, exact SemVer, and `sha-<full-commit>`.
-Main-branch builds never move `latest`; prereleases never move it either.
-To build locally before images are published, use the original
-`docker compose up -d --build` recipe.
+The publisher uses `latest` for the highest stable release, exact SemVer for
+releases and `sha-<full-commit>` for commit builds. Main-branch builds and
+prereleases leave `latest` unchanged.
+<!-- source: docker-compose.image.yml:4; docs/releases.md:1; scripts/image-tags.mjs:10 -->
 
-| Runtime | Entry | Good for |
-|---------|--------|----------|
-| **Node / Docker** (primary) | Streamable HTTP `/mcp` or stdio | Any server, behind Cloudflare Tunnel + MCP portal |
-| **Cloudflare Worker** | `/mcp` | Hosted remote MCP, KV cursors, Cron |
+Inspired by [email-smtp-imap-mcp](https://github.com/samihalawa/email-smtp-imap-mcp).
+Workers use TCP-socket clients (`cf-imap`, `worker-mailer`). The project has
+its own Git history.
+<!-- source: apps/worker/package.json:16; README.md at origin/main:43 -->
 
-Inspired by [email-smtp-imap-mcp](https://github.com/samihalawa/email-smtp-imap-mcp). Not a git fork; Workers need TCP-socket clients (`cf-imap`, `worker-mailer`).
+## Modes
+
+| `MAIL_MODE` | Adds | SMTP needed |
+|-------------|------|-------------|
+| `pull` | read + organize | no |
+| `draft` | `email_draft` | no |
+| `pull_push` | `email_draft`, `email_send`, `email_respond` | yes, every account |
+
+## Configure
+
+Use [`.env.example`](.env.example) as the Docker or Node template. Set Worker values in Wrangler vars and secrets. Defaults below are runtime defaults unless the runtime is named.
+<!-- source: .env.example:1; apps/worker/wrangler.toml:14 -->
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `EMAIL_ACCOUNTS_JSON` | Unset | `{"work":{"imap":{…},"smtp":{…},"default_from_name":"…","sender_emails":[…]}}`; or single-account `IMAP_*`/`SMTP_*` <!-- source: .env.example:41; packages/core/src/config.ts:149 --> |
+| `IMAP_HOST`, `IMAP_PORT`, `IMAP_SECURE`, `IMAP_USER`, `IMAP_PASS` | Port `993`, TLS on for port `993` | Single-account IMAP settings. Host, user and password are required. <!-- source: packages/core/src/config.ts:171 --> |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` | Port `587`, TLS on for port `465` | Single-account SMTP settings. Required in `pull_push` mode. <!-- source: packages/core/src/config.ts:190; packages/core/src/config.ts:224 --> |
+| `DEFAULT_FROM_NAME`, `SENDER_EMAILS` | Unset | Single-account display name and comma-separated sender addresses. <!-- source: packages/core/src/config.ts:182; .env.example:56 --> |
+| `DEFAULT_EMAIL_ACCOUNT` | `default` if present, otherwise the first account | Mailbox used when a tool call omits `account_name`. <!-- source: packages/core/src/config.ts:214; packages/core/src/dispatch.ts:419 --> |
+| `MAIL_MODE` | `pull_push` | `pull` / `draft` / `pull_push` <!-- source: packages/core/src/config.ts:28 --> |
+| `MCP_BEARER_TOKEN` | Unset | Required for HTTP <!-- source: apps/node/src/index.ts:17; apps/worker/src/mcp.ts:69 --> |
+| `SEND_ALLOWLIST` | empty = anyone | addresses or domains (subdomains match) <!-- source: .env.example:15; packages/core/src/config.ts:244 --> |
+| `SAVE_SENT` | `auto` | `auto` / `true` / `false` <!-- source: .env.example:19; packages/core/src/config.ts:243 --> |
+| `MAX_BODY_CHARS` | `20000` | `email_get` text cap (per call: `max_chars`) <!-- source: packages/core/src/config.ts:245; docs/usage.md:33 --> |
+| `ATTACHMENT_MAX_BYTES` | `2000000` | larger attachments are listed, content omitted <!-- source: packages/core/src/config.ts:246; docs/usage.md:33 --> |
+| `CACHE_TTL_SECONDS` | `0` | optional listing cache (Node memory / Worker KV), invalidated on writes <!-- source: packages/core/src/config.ts:240; docs/usage.md:164 --> |
+| `EVENTS_POLL_SECONDS` | `0` in core, `300` in checked-in Wrangler vars | Optional background cursor warm-up <!-- source: packages/core/src/config.ts:241; apps/worker/wrangler.toml:17 --> |
+| `SIEVE_HOST` | Unset | Enable the six `sieve_*` tools (ManageSieve, RFC 5804). Auth reuses each account's IMAP credentials. Node/Docker only <!-- source: .env.example:61; packages/core/src/config.ts:50 --> |
+| `SIEVE_PORT` | `4190` | ManageSieve port <!-- source: packages/core/src/config.ts:58 --> |
+| `SIEVE_SECURE` | `starttls` | `starttls` / `tls` (implicit) / `plain` <!-- source: packages/core/src/config.ts:52 --> |
+| `MCP_TRANSPORT`, `PORT` | Node: `stdio`, `8787`. Compose: `http`, `8787`. | Node transport and HTTP port. <!-- source: apps/node/src/index.ts:15; docker-compose.yml:9; docker-compose.image.yml:6 --> |
+| `EMAIL_ENV_FILE` | Unset | Node override for the dotenv file path. <!-- source: apps/node/src/index.ts:7 --> |
+| `MAX_REQUEST_BYTES` | `33554432` | Node HTTP request body cap in bytes. <!-- source: apps/node/src/server.ts:21; apps/node/src/server.ts:88 --> |
+| `MAIL_MCP_IMAGE` | `ghcr.io/l92-labs/mail-mcp:latest` | Published-image Compose reference. <!-- source: docker-compose.image.yml:4 --> |
+| `TUNNEL_TOKEN` | Empty | Set for the Compose tunnel profile. <!-- source: docker-compose.yml:24; docker-compose.image.yml:13 --> |
+| `SENT_FOLDER`, `DRAFTS_FOLDER` | Auto-detect | Override Sent and Drafts. In account JSON use `sent_folder` and `drafts_folder`. Otherwise resolution tries IMAP special-use, then common names (including French). <!-- source: .env.example:42; .env.example:58; packages/core/src/dispatch.ts:315; packages/core/src/compose.ts:122 --> |
+
+Use provider **app passwords** (Gmail, iCloud, Fastmail…).
 
 ## Tools
 
@@ -79,38 +151,6 @@ Every tool takes an optional `account_name`. Email ids look like `"<folder>:<uid
 
 Set `SIEVE_HOST` (e.g. the host from `IMAP_HOST`) and the server registers six `sieve_*` tools for managing the account's mail filters over ManageSieve (RFC 5804). Auth reuses each account's IMAP credentials; every call opens a fresh connection with STARTTLS (or implicit TLS via `SIEVE_SECURE=tls`). Convention: keep one primary script named `active` — `sieve_script_put` with `name: "active"` validates it server-side before saving, `sieve_script_activate` makes it live. Deleting the active script is refused; activate another script first. Requires a server with ManageSieve enabled (Dovecot Pigeonhole, Cyrus, …). **Not available on the Workers runtime** — Workers lack raw TCP/STARTTLS sockets, so the tools are never registered there, even if `SIEVE_HOST` is set.
 
-## Modes
-
-| `MAIL_MODE` | Adds | SMTP needed |
-|-------------|------|-------------|
-| `pull` | read + organize | no |
-| `draft` | `email_draft` | no |
-| `pull_push` | `email_draft`, `email_send`, `email_respond` | yes, every account |
-
-## Configure
-
-Copy [`.env.example`](.env.example) → `.env`. Main variables:
-
-| Var | Default | |
-|-----|---------|--|
-| `EMAIL_ACCOUNTS_JSON` | — | `{"work":{"imap":{…},"smtp":{…},"default_from_name":"…","sender_emails":[…]}}`; or single-account `IMAP_*`/`SMTP_*` |
-| `DEFAULT_EMAIL_ACCOUNT` | `default` / first | |
-| `MAIL_MODE` | `pull_push` | `pull` / `draft` / `pull_push` |
-| `MCP_BEARER_TOKEN` | — | Required for HTTP |
-| `SEND_ALLOWLIST` | empty = anyone | addresses or domains (subdomains match) |
-| `SAVE_SENT` | `auto` | `auto` / `true` / `false` |
-| `MAX_BODY_CHARS` | `20000` | `email_get` text cap (per call: `max_chars`) |
-| `ATTACHMENT_MAX_BYTES` | `2000000` | larger attachments are listed, content omitted |
-| `CACHE_TTL_SECONDS` | `0` | optional listing cache (Node memory / Worker KV), invalidated on writes |
-| `EVENTS_POLL_SECONDS` | `0` | optional background cursor warm-up |
-| `SIEVE_HOST` | — | Enable the six `sieve_*` tools (ManageSieve, RFC 5804). Auth reuses each account's IMAP credentials. Node/Docker only |
-| `SIEVE_PORT` | `4190` | ManageSieve port |
-| `SIEVE_SECURE` | `starttls` | `starttls` / `tls` (implicit) / `plain` |
-
-Per-account folder overrides: `sent_folder`, `drafts_folder` (or `SENT_FOLDER`/`DRAFTS_FOLDER`). Otherwise they're resolved through IMAP special-use, then common names (incl. French).
-
-Use provider **app passwords** (Gmail, iCloud, Fastmail…).
-
 ## Deploy: Docker + Cloudflare Tunnel + MCP portal
 
 ```
@@ -127,9 +167,16 @@ Without the tunnel profile, MCP listens on `127.0.0.1:8787` only. The container 
 
 ## Node / stdio (Claude Desktop, Cursor)
 
+Use Node 22 and Corepack. From the repository root, copy `.env.example` to
+`.env` and edit the mailbox settings and mode before launching the client.
+<!-- source: CONTRIBUTING.md:3; .env.example:1; apps/node/src/index.ts:7 -->
+
 ```bash
-pnpm install && pnpm build
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
 ```
+<!-- source: CONTRIBUTING.md:5; package.json:8 -->
 
 ```json
 {
@@ -145,14 +192,23 @@ pnpm install && pnpm build
 
 ## Cloudflare Workers
 
+Use Node 22, Corepack and an authenticated Wrangler session. Replace the KV ID
+in `wrangler.toml` after creating the namespace. Set the desired Wrangler vars
+before deploying.
+<!-- source: CONTRIBUTING.md:3; apps/worker/wrangler.toml:6; docs/usage.md:192; README.md at origin/main:146 -->
+
 ```bash
-pnpm install && pnpm build
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
 cd apps/worker
-npx wrangler kv namespace create MAIL_KV     # put the id in wrangler.toml
+npx wrangler kv namespace create MAIL_KV
+# Replace the placeholder id in wrangler.toml before continuing.
 npx wrangler secret put MCP_BEARER_TOKEN
 npx wrangler secret put EMAIL_ACCOUNTS_JSON
 pnpm deploy
 ```
+<!-- source: CONTRIBUTING.md:5; README.md at origin/main:151; apps/worker/wrangler.toml:6; apps/worker/package.json:6; wrangler kv namespace create --help -->
 
 Workers can't use SMTP port 25 (use 587/465). `has_attachments=false` isn't supported there.
 The `sieve_*` tools are **not** registered on Workers (no raw TCP/STARTTLS); use the
@@ -172,8 +228,12 @@ see [event semantics](docs/usage.md#events-and-cache).
 pnpm test        # unit tests
 pnpm typecheck
 pnpm e2e:local   # real IMAP/SMTP end-to-end: starts GreenMail in Docker, runs the suite, tears down
-# same suite against the Worker: E2E_URL=http://127.0.0.1:8798 node apps/node/scripts/e2e.mjs
+# Against an already-running Worker configured for the isolated test mailbox:
+# Set WORKER_URL to that Worker's URL first.
+# E2E_URL="$WORKER_URL" node apps/node/scripts/e2e.mjs
 ```
+
+<!-- source: package.json:9; CONTRIBUTING.md:13; apps/node/scripts/e2e.mjs:84; README.md at origin/main:175 -->
 
 ## Layout
 
